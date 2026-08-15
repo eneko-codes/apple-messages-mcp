@@ -1,0 +1,66 @@
+{
+  "manifest_version": "0.3",
+  "name": "apple-messages-mcp",
+  "display_name": "Messages",
+  "version": "1.0.0",
+  "description": "Search and read iMessage history; sending is gated by this extension's own permission switch",
+  "long_description": "A local MCP server written in Swift for Messages on this Mac. Reading and sending take different routes.\n\nReading comes from the local Messages database, opened read-only and immutable — this server cannot write to it, lock it, or disturb Messages' own writes. That file is protected, so reading needs Full Disk Access, granted by hand in System Settings. There is no permission dialog for it and no way for a server to ask.\n\nSending goes through a shortcut in the Shortcuts app, so it still works when the database cannot be opened.\n\nPlug and play: there is nothing to configure. SENDING is off unless you build a shortcut named exactly \"Claude Send Message\" in the Shortcuts app, and even then is controlled only by this extension's own permission switch below — set it to \"ask\" to approve every send by hand, or \"prohibit\" to disable sending entirely. Sending cannot be undone and there is no recall.\n\nNo tool here modifies or deletes a message.\n\nNot affiliated with or endorsed by Apple Inc.",
+  "author": {
+    "name": "eneko-codes",
+    "url": "https://github.com/eneko-codes"
+  },
+  "homepage": "https://github.com/eneko-codes/apple-messages-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/eneko-codes/apple-messages-mcp"
+  },
+  "license": "MIT",
+  "icon": "icon.png",
+  "keywords": [
+    "imessage",
+    "messages",
+    "sms",
+    "macos"
+  ],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/apple-messages-mcp",
+    "mcp_config": {
+      "command": "${__dirname}/server/apple-messages-mcp",
+      "args": [],
+      "env": {}
+    }
+  },
+  "tools": [
+    {
+      "name": "messages_status",
+      "description": "Reports whether this server can read the Messages database, whether the send shortcut exists, and the exact path of the binary to add to Full Disk Access. Reads no messages."
+    },
+    {
+      "name": "conversations_list",
+      "description": "Lists conversations newest-activity first, with participants, whether each is a group, its message count, unread count and id."
+    },
+    {
+      "name": "conversation_get",
+      "description": "Returns one page of a thread, NEWEST FIRST, with the sender, timestamp, text and message id of each row. Page backwards through the history with 'offset'."
+    },
+    {
+      "name": "messages_search",
+      "description": "Finds messages across the whole archive, newest first. Every filter mirrors a column the database already has, and they combine with AND."
+    },
+    {
+      "name": "message_attachments",
+      "description": "Lists what is attached to the given messages: file name, type, size, direction, the path on disk and whether the file is still there — old attachments are offloaded to iCloud and leave their row…"
+    },
+    {
+      "name": "send_message",
+      "description": "Sends an iMessage or SMS by running the configured shortcut. IT CANNOT BE UNDONE — there is no recall and no undo, and the recipient may read it immediately."
+    }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": [
+      "darwin"
+    ]
+  }
+}

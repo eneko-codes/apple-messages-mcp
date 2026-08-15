@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- CFBundleName is the label macOS shows in System Settings > Privacy & Security.
+	     Keep it identical to the binary name so both the Full Disk Access row and the
+	     Automation row are recognisable. -->
+	<key>CFBundleName</key>
+	<string>apple-messages-mcp</string>
+	<key>CFBundleIdentifier</key>
+	<string>codes.eneko.apple-messages-mcp</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+
+	<!-- The send path runs a shortcut, and driving another application is automation:
+	     macOS attributes the Apple event to this binary and asks for consent once, per
+	     target application. Key name verified against the tccd binary on macOS 26.5.
+
+	     Reading is NOT covered by anything here. ~/Library/Messages/chat.db is behind
+	     Full Disk Access, which has no usage-description key at all — it is granted by
+	     hand in System Settings and a process can only detect that it is missing. -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Lets Claude send a message by running the Shortcuts action you configured. Every send needs your confirmation and can be turned off in this extension's tool settings.</string>
+</dict>
+</plist>
