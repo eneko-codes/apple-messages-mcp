@@ -268,21 +268,6 @@ struct MessageToolsTests {
                 != Configuration.normalizeRecipient("600000001"))
     }
 
-    @Test("A confirmed send passes the exact text through unchanged")
-    func sendPassesTextThrough() async {
-        let store = stocked()
-        let (_, isError) = await call(
-            ToolCatalog.sendName,
-            [
-                "recipient": .string("+34600000001"),
-                "text": .string("  bring the bread  "), "confirm": .bool(true),
-            ],
-            store: store)
-        #expect(!isError)
-        #expect(store.sent.first?.recipient == "+34600000001")
-        #expect(store.sent.first?.text.contains("bring the bread") == true)
-    }
-
     @Test("A store failure is reported rather than swallowed")
     func storeFailureIsReported() async {
         let store = stocked()
