@@ -44,6 +44,11 @@ named in the question you asked, it has to have a way back, and you have to say 
 you are on and why the gentler ones cannot answer it. Whatever you created, remove in the
 same session.
 
+**Work on a copy in `$TMPDIR`.** `SystemMessageStore` takes a `databasePath`, so a copy of
+`chat.db` under a temporary directory you created yourself — never the live file — is how
+rung 4 is done here. Delete it in the same session. (A send has no such copy: it either
+goes to a real number or it does not happen.)
+
 ## What this is
 
 A local MCP server (Swift 6, stdio transport) for Messages. Reads come from `~/Library/Messages/chat.db` (read-only, immutable); sending goes through a Shortcuts app shortcut. No network, no credential, no cloud API.
