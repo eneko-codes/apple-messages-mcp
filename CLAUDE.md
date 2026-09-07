@@ -16,6 +16,17 @@ No tool modifies or deletes an existing message. `send_message` requires `confir
 
 A local MCP server (Swift 6, stdio transport) for Messages. Reads come from `~/Library/Messages/chat.db` (read-only, immutable); sending goes through a Shortcuts app shortcut. No network, no credential, no cloud API.
 
+## APIs
+
+No Apple framework covers Messages. Reads are the [SQLite C API](https://www.sqlite.org/c3ref/intro.html) against `chat.db`, opened read-only and immutable through a [URI filename](https://www.sqlite.org/uri.html); POSIX `open(2)` plus `errno` is the only way to tell a Full Disk Access denial from a missing file, since macOS exposes no API for that. Sending runs `/usr/bin/shortcuts` through `Foundation.Process`.
+
+## Surface not used
+
+- FTS and `MATCH`. Newer rows keep their text in a typed-stream `attributedBody` blob that SQL cannot search, so matching happens in Swift after decoding.
+- The online-backup, blob, authorizer and busy-handler APIs.
+- Every Apple-event API. This server drives no app, and `NSAppleEventsUsageDescription` is declared only because a prompt raised by the `shortcuts` subprocess may be attributed to this binary.
+- The database is Apple's private schema, undocumented and free to change: `PRAGMA table_info` checks the columns before trusting them.
+
 ## Commands
 
 ```bash

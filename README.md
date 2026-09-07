@@ -38,6 +38,21 @@ Not affiliated with or endorsed by Apple Inc.
 | `message_attachments` | read | What is attached to given message ids: file name, type, size, direction, path on disk, and whether the file is still there. |
 | `send_message` | **irreversible** | Sends an iMessage or SMS by running the configured shortcut. Requires `confirm: true`. |
 
+## Frameworks and APIs
+
+There is no Apple framework for Messages. Reads are SQL against Messages' own database;
+sending is a subprocess.
+
+| Used | For | Reference |
+|---|---|---|
+| SQLite C API — `sqlite3_open_v2` with `SQLITE_OPEN_READONLY`, prepared statements, `PRAGMA table_info` | Every read, over `file:…?mode=ro&immutable=1` | [SQLite C API](https://www.sqlite.org/c3ref/intro.html), [URI filenames](https://www.sqlite.org/uri.html) |
+| POSIX `open(2)` + `errno` | Telling a Full Disk Access denial (`EPERM`) apart from a missing file (`ENOENT`) — macOS offers no API for this | — |
+| `Foundation.Process` on `/usr/bin/shortcuts` | `send_message`, the only write | — |
+
+Not used: FTS or `MATCH` (text matching happens in Swift, because newer rows keep their text
+in a typed-stream blob SQL cannot search), the online-backup and blob APIs, any authorizer or
+busy handler, and every Apple-event API — this server drives no app.
+
 ## The rules worth knowing before you use it
 
 **Sending never touches the database.** `send_message` could not go through
@@ -63,8 +78,7 @@ refused before anything is sent.
 can touch the write-ahead log; `immutable=1` goes further and promises SQLite the file
 will not change underneath it, so it opens no journal and writes nothing at all. This
 server cannot alter Messages' own storage. The price is honest: writes Messages has not
-yet checkpointed are not visible, so the newest message can be briefly missing —
-`messages_status` reports that rather than letting it read as data loss.
+yet checkpointed are not visible, so the newest message can be briefly missing.
 
 **Message text lives in two places.** Older rows carry plain `text`; newer ones carry
 only a typed-stream `attributedBody` blob that SQL cannot search inside, so text
@@ -138,9 +152,10 @@ Claude Desktop set to something other than "prohibit" — see
 
 The binary is **its own privacy subject**: Claude Desktop launches MCP servers through
 `Contents/Helpers/disclaimer`, which calls `responsibility_spawnattrs_setdisclaim`, so
-the child cannot inherit Claude.app's own permissions. The embedded
-`Resources/Info.plist` carries the usage description the Shortcuts path needs. If no
-prompt ever appears:
+the child cannot inherit Claude.app's own permissions. The embedded `Resources/Info.plist` carries
+`NSAppleEventsUsageDescription`. This server sends no Apple event itself — sending runs
+`/usr/bin/shortcuts` as a subprocess — so the key is declared against a prompt that may be
+attributed to this binary rather than to `shortcuts`. To check it is embedded:
 
 ```bash
 otool -P extension/server/apple-messages-mcp | grep NSAppleEventsUsageDescription
@@ -215,8 +230,8 @@ both at once: two registrations under the same display name collide, and
   **newest** matches, never a random subset — narrow the search with `participant`,
   `conversation_id` or a date range rather than trusting an unbounded one.
 - **The newest message can be briefly absent.** `immutable=1` means writes Messages has
-  not yet checkpointed to disk are invisible to this server. `messages_status` reports
-  this state rather than it looking like the message was never sent.
+  not yet checkpointed to disk are invisible to this server. Nothing detects that state, so
+  a just-sent message that is missing is worth re-reading a moment later.
 - **Offloaded attachments are reported as absent, not as an error.** Older attachments
   move to iCloud and leave their database row behind with no file on disk;
   `message_attachments` says so rather than failing.
@@ -234,7 +249,7 @@ swift build
 swift test
 ```
 
-20 tests, all against an in-memory fake (`FakeMessageStore`) — no Full Disk Access, no
+26 tests across two suites, all against an in-memory fake (`FakeMessageStore`) — no Full Disk Access, no
 real database, and no message ever leaves the process. See `CLAUDE.md`, whose first
 section is the hard rule that makes that non-negotiable: agents in this repository may
 never send a message or read the owner's real conversations, by any route.
