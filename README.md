@@ -240,7 +240,7 @@ section is the hard rule that makes that non-negotiable: agents in this reposito
 never send a message or read the owner's real conversations, by any route.
 
 Manual verification against a real database and a real send is the owner's job, done by
-hand with MCP Inspector; `verification.md` is the script for it.
+hand with MCP Inspector.
 
 ## Licence
 
