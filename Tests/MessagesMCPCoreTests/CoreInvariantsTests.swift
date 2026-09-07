@@ -6,7 +6,7 @@ import Testing
 /// Pins the handful of invariants that live below `MessageStore` but are still pure
 /// functions, free of SQLite and Shortcuts I/O, so they can be proven directly rather
 /// than only by hand. Everything else below that seam — the real database, the real
-/// shortcut — stays out of this suite by design and is verified per `verification.md`.
+/// shortcut — stays out of this suite by design and is verified by hand.
 @Suite("Core invariants")
 struct CoreInvariantsTests {
 
