@@ -6,10 +6,8 @@ import MessagesMCPCore
 do {
     try await MessagesMCPServer.run()
 } catch {
-    // stdout carries JSON-RPC and nothing else, so the one diagnostic this process ever
-    // prints goes to stderr. Exiting 0 here would be indistinguishable from a clean
-    // shutdown, which is how a server disappears mid-session with nothing to show for it.
-    FileHandle.standardError.write(
-        Data("apple-messages-mcp: \(error.localizedDescription)\n".utf8))
+    // Exiting 0 here would be indistinguishable from a clean shutdown, which is how a
+    // server disappears mid-session with nothing to show for it.
+    Diagnostics.fatal(error)
     exit(1)
 }
