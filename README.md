@@ -81,8 +81,17 @@ also a promise to SQLite that nothing changes the file, which is false while Mes
 runs — SQLite documents that it may then return incorrect results or `SQLITE_CORRUPT`.
 A read-only reader takes a shared lock for the length of one short transaction; in WAL
 mode that never blocks Messages' own writes, and a read-only connection cannot
-checkpoint. `PRAGMA query_only` is set on every connection as a second refusal to write,
-so this server cannot alter Messages' own storage.
+checkpoint. SQLite does record the reader in the `-shm` index, so that file's bytes and
+modification time change when this server reads — it is a coordination file, never
+message data. `PRAGMA query_only` is set on every connection as a second refusal to
+write, so this server cannot alter the messages themselves.
+
+The one exception is a database nobody has open: SQLite deletes the `-wal` and `-shm`
+files when its last connection closes, a `mode=ro` connection could not open the file
+without them in testing, and with nothing running there is nothing to read from the log
+and nothing that can change the file — exactly what `immutable=1` promises, and one of the
+three documented ways to open a WAL database read-only. That case, and only that case,
+uses `immutable=1`.
 
 **Message text lives in two places.** Older rows carry plain `text`; newer ones carry
 only a typed-stream `attributedBody` blob that SQL cannot search inside, so text

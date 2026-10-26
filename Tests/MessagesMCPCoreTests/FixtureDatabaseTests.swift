@@ -61,6 +61,19 @@ private final class Fixture {
         }
     }
 
+    /// Closes the writer and removes the sidecars, leaving a self-contained database.
+    /// SQLite checkpoints when its last connection closes, so nothing is lost; the system
+    /// library keeps the files afterwards (it persists the WAL), so they are deleted here
+    /// to reproduce a database nobody has open.
+    func closeWriterAndRemoveSidecars() {
+        sqlite3_close(writer)
+        closed = true
+        try? FileManager.default.removeItem(atPath: path + "-wal")
+        try? FileManager.default.removeItem(atPath: path + "-shm")
+    }
+
+    private var closed = false
+
     /// Moves everything written so far into the main file and empties the log.
     func checkpoint() throws { try execute("PRAGMA wal_checkpoint(TRUNCATE)") }
 
@@ -84,7 +97,7 @@ private final class Fixture {
     }
 
     deinit {
-        sqlite3_close(writer)
+        if !closed { sqlite3_close(writer) }
         try? FileManager.default.removeItem(at: directory)
     }
 }
@@ -128,6 +141,20 @@ struct FixtureDatabaseTests {
         #expect(page.total == 4)
         #expect(page.messages.map(\.id) == [4, 3, 2, 1])
         #expect(page.messages.first?.text == "also only in the log")
+    }
+
+    @Test("A database nobody has open any more is still read")
+    func readsAfterTheWriterQuits() async throws {
+        let fixture = try populated()
+        fixture.closeWriterAndRemoveSidecars()
+        #expect(!FileManager.default.fileExists(atPath: fixture.path + "-wal"))
+        #expect(!FileManager.default.fileExists(atPath: fixture.path + "-shm"))
+
+        let page = try await store(fixture).conversation(id: 1, limit: 10, offset: 0)
+        #expect(page.total == 4)
+        // Reading it created nothing beside the file.
+        #expect(!FileManager.default.fileExists(atPath: fixture.path + "-wal"))
+        #expect(!FileManager.default.fileExists(atPath: fixture.path + "-shm"))
     }
 
     @Test("A search sees the log too")

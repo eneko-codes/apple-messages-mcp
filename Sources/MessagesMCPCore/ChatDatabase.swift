@@ -24,10 +24,22 @@ import SQLite3
 /// consequence: it "might return incorrect query results and/or SQLITE_CORRUPT errors"
 /// (https://www.sqlite.org/uri.html).
 ///
-/// What reading the log costs is a shared lock and a mapping of the `-shm` index for the
-/// length of one read transaction. In WAL mode a reader never blocks the writer, and a
-/// read-only connection cannot checkpoint, so Messages keeps writing while this server
-/// reads. Every tool call is one short transaction on its own connection.
+/// What reading the log costs is a shared lock on the `-shm` index for the length of one
+/// read transaction, and SQLite records the reader in that index — so the `-shm` file's
+/// bytes and modification time change when this server reads. It is a coordination file,
+/// never message data. In WAL mode a reader never blocks the writer, and a read-only
+/// connection cannot checkpoint, so Messages keeps writing while this server reads. Every
+/// tool call is one short transaction on its own connection.
+///
+/// ## When there is no log to read
+///
+/// SQLite documents when a read-only connection can open a WAL database: the `-shm` and
+/// `-wal` files exist and are readable, the directory is writable so they can be created,
+/// or the file is opened `immutable` (https://www.sqlite.org/wal.html). A `mode=ro`
+/// connection to a database whose sidecars are gone failed to open when tried, with
+/// `SQLITE_CANTOPEN`. Sidecars are gone only when no connection has the database open —
+/// the last one to close deletes them — and then nothing is changing the file, which is
+/// exactly what `immutable=1` promises. So that, and only that, is when it is used.
 ///
 /// ## Why every column is probed
 ///
@@ -60,7 +72,7 @@ final class ChatDatabase {
     ///
     /// Static and pure so the one string that decides whether this server can write is
     /// asserted directly in a test rather than inferred from behaviour.
-    static func uri(forPath path: String) -> String {
+    static func uri(forPath path: String, immutable: Bool = false) -> String {
         // Everything outside this set is percent-encoded. '?' would start the query
         // string, '#' the fragment and '%' an escape, so a path containing one of them
         // would otherwise open a different file — or a writable one.
@@ -68,7 +80,20 @@ final class ChatDatabase {
             charactersIn:
                 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/:@!$&'()*+,;=")
         let encoded = path.addingPercentEncoding(withAllowedCharacters: unreserved) ?? path
-        return "file:\(encoded)?mode=ro"
+        return "file:\(encoded)?mode=ro" + (immutable ? "&immutable=1" : "")
+    }
+
+    /// Whether a connection currently has this database open in WAL mode. The `-shm` file
+    /// exists for exactly as long as one does.
+    static func hasJournalSidecars(path: String) -> Bool {
+        FileManager.default.fileExists(atPath: path + "-wal")
+            && FileManager.default.fileExists(atPath: path + "-shm")
+    }
+
+    /// `mode=ro`, through the log, whenever another process has the file open; the
+    /// documented `immutable=1` fallback only when it demonstrably has not.
+    static func openingURI(forPath path: String) -> String {
+        uri(forPath: path, immutable: !hasJournalSidecars(path: path))
     }
 
     /// Distinguishes "not there" from "not allowed" before SQLite is involved.
@@ -108,7 +133,7 @@ final class ChatDatabase {
         // No SQLITE_OPEN_READWRITE and no SQLITE_OPEN_CREATE: a typo in the path must
         // fail, never conjure an empty database next to the real one.
         let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX
-        let code = sqlite3_open_v2(Self.uri(forPath: path), &pointer, flags, nil)
+        let code = sqlite3_open_v2(Self.openingURI(forPath: path), &pointer, flags, nil)
         guard code == SQLITE_OK, let pointer else {
             let detail = pointer.map { String(cString: sqlite3_errmsg($0)) } ?? "code \(code)"
             let systemErrno = pointer.map { sqlite3_system_errno($0) } ?? 0

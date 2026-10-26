@@ -23,7 +23,7 @@ No Apple framework covers Messages. Reads are the [SQLite C API](https://www.sql
 ## Surface not used
 
 - FTS and `MATCH`. Newer rows keep their text in a typed-stream `attributedBody` blob that SQL cannot search, so matching happens in Swift after decoding.
-- `immutable=1`, which skips the write-ahead log and hides the newest messages, and the online-backup, blob, authorizer and busy-handler APIs.
+- `immutable=1` while the file is in use: it skips the write-ahead log and hides the newest messages. It is used only when no `-wal`/`-shm` pair exists, i.e. nothing has the database open. Also not used: the online-backup, blob, authorizer and busy-handler APIs.
 - Every Apple-event API. This server drives no app, and `NSAppleEventsUsageDescription` is declared only because a prompt raised by the `shortcuts` subprocess may be attributed to this binary.
 - The database is Apple's private schema, undocumented and free to change: `PRAGMA table_info` checks the columns before trusting them.
 

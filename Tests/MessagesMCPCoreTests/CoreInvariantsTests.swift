@@ -27,6 +27,21 @@ struct CoreInvariantsTests {
     /// early, letting a crafted path override the mode or open a different file
     /// entirely. Percent-encoding everything outside the unreserved set is what stops
     /// that from ever being possible.
+    @Test("immutable is used only when no process has the database open")
+    func immutableOnlyWithoutSidecars() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("apple-messages-mcp-sidecars-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("chat.db").path
+
+        #expect(ChatDatabase.openingURI(forPath: path).hasSuffix("?mode=ro&immutable=1"))
+        FileManager.default.createFile(atPath: path + "-wal", contents: Data())
+        #expect(ChatDatabase.openingURI(forPath: path).hasSuffix("?mode=ro&immutable=1"))
+        FileManager.default.createFile(atPath: path + "-shm", contents: Data())
+        #expect(ChatDatabase.openingURI(forPath: path).hasSuffix("?mode=ro"))
+    }
+
     @Test("A path with reserved characters cannot smuggle a different mode into the URI")
     func databaseURIEncodesReservedCharacters() {
         let uri = ChatDatabase.uri(forPath: "/tmp/evil?mode=rw#chat.db")
