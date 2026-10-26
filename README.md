@@ -9,9 +9,9 @@ database on this Mac, and a confirmed path for sending a message through the Sho
 app. It ships as a Claude extension.
 
 Reading and sending take different routes, with different failure modes and different
-permissions. Reading opens `~/Library/Messages/chat.db` directly, read-only and
-immutable — there is no framework for Messages, so the database is the only complete
-source, and it costs the broadest permission on the Mac, Full Disk Access. Sending goes
+permissions. Reading opens `~/Library/Messages/chat.db` directly, read-only and read
+through its write-ahead log — there is no framework for Messages, so the database is the
+only complete source, and it costs the broadest permission on the Mac, Full Disk Access. Sending goes
 through a shortcut named exactly **"Claude Send Message"** that you build yourself in
 the Shortcuts app: there is nothing to configure, and it works even when the database
 cannot be opened at all.
@@ -45,7 +45,7 @@ sending is a subprocess.
 
 | Used | For | Reference |
 |---|---|---|
-| SQLite C API — `sqlite3_open_v2` with `SQLITE_OPEN_READONLY`, prepared statements, `PRAGMA table_info` | Every read, over `file:…?mode=ro&immutable=1` | [SQLite C API](https://www.sqlite.org/c3ref/intro.html), [URI filenames](https://www.sqlite.org/uri.html) |
+| SQLite C API — `sqlite3_open_v2` with `SQLITE_OPEN_READONLY`, prepared statements, `PRAGMA table_info`, `PRAGMA query_only` | Every read, over `file:…?mode=ro`, inside one read transaction | [SQLite C API](https://www.sqlite.org/c3ref/intro.html), [URI filenames](https://www.sqlite.org/uri.html) |
 | POSIX `open(2)` + `errno` | Telling a Full Disk Access denial (`EPERM`) apart from a missing file (`ENOENT`) — macOS offers no API for this | — |
 | `Foundation.Process` on `/usr/bin/shortcuts` | `send_message`, the only write | — |
 
@@ -74,11 +74,15 @@ own judgement before it calls the tool. Sending **cannot be undone**: there is n
 recall, and the recipient may read it immediately. A body over 4,000 characters is
 refused before anything is sent.
 
-**The database is opened `mode=ro&immutable=1`.** Read-only alone still takes locks and
-can touch the write-ahead log; `immutable=1` goes further and promises SQLite the file
-will not change underneath it, so it opens no journal and writes nothing at all. This
-server cannot alter Messages' own storage. The price is honest: writes Messages has not
-yet checkpointed are not visible, so the newest message can be briefly missing.
+**The database is opened `mode=ro`, and deliberately not `immutable=1`.** Messages keeps
+it in WAL mode and checkpoints rarely, so the newest messages often live only in the
+`-wal` file; an immutable reader never looks there and would miss them. `immutable=1` is
+also a promise to SQLite that nothing changes the file, which is false while Messages
+runs — SQLite documents that it may then return incorrect results or `SQLITE_CORRUPT`.
+A read-only reader takes a shared lock for the length of one short transaction; in WAL
+mode that never blocks Messages' own writes, and a read-only connection cannot
+checkpoint. `PRAGMA query_only` is set on every connection as a second refusal to write,
+so this server cannot alter Messages' own storage.
 
 **Message text lives in two places.** Older rows carry plain `text`; newer ones carry
 only a typed-stream `attributedBody` blob that SQL cannot search inside, so text
@@ -229,9 +233,9 @@ both at once: two registrations under the same display name collide, and
   whichever comes first, and always reports how many it read. A truncated result is the
   **newest** matches, never a random subset — narrow the search with `participant`,
   `conversation_id` or a date range rather than trusting an unbounded one.
-- **The newest message can be briefly absent.** `immutable=1` means writes Messages has
-  not yet checkpointed to disk are invisible to this server. Nothing detects that state, so
-  a just-sent message that is missing is worth re-reading a moment later.
+- **A message written a moment ago can be missing.** Reads go through the write-ahead
+  log, but a transaction Messages has not committed yet is not visible. `messages_status`
+  reports the size of the log.
 - **Offloaded attachments are reported as absent, not as an error.** Older attachments
   move to iCloud and leave their database row behind with no file on disk;
   `message_attachments` says so rather than failing.
@@ -249,8 +253,10 @@ swift build
 swift test
 ```
 
-26 tests across two suites, all against an in-memory fake (`FakeMessageStore`) — no Full Disk Access, no
-real database, and no message ever leaves the process. See `CLAUDE.md`, whose first
+The suite runs against an in-memory fake (`FakeMessageStore`) and against a database it
+invents in a temporary directory with the tables and columns the reader uses, including
+rows left only in the write-ahead log — no Full Disk Access, no real database, and no
+message ever leaves the process. See `CLAUDE.md`, whose first
 section is the hard rule that makes that non-negotiable: agents in this repository may
 never send a message or read the owner's real conversations, by any route.
 

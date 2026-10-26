@@ -263,12 +263,15 @@ public struct StoreStatus: Sendable, Equatable {
     /// Whether `/usr/bin/shortcuts` exists and lists the configured shortcut. `nil` when
     /// the check could not be run at all.
     public let sendShortcutInstalled: Bool?
+    /// Size of the `-wal` file. This server reads through it, so it is the newest history
+    /// that has not yet been checkpointed into the main file.
+    public let walBytes: Int64?
 
     public init(
         access: DatabaseAccess, databasePath: String, openedReadOnly: Bool,
         dateUnit: AppleTimeUnit? = nil, conversationCount: Int? = nil, messageCount: Int? = nil,
         attachmentCount: Int? = nil, newestMessageDate: Date? = nil,
-        sendShortcutInstalled: Bool? = nil
+        sendShortcutInstalled: Bool? = nil, walBytes: Int64? = nil
     ) {
         self.access = access
         self.databasePath = databasePath
@@ -279,6 +282,7 @@ public struct StoreStatus: Sendable, Equatable {
         self.attachmentCount = attachmentCount
         self.newestMessageDate = newestMessageDate
         self.sendShortcutInstalled = sendShortcutInstalled
+        self.walBytes = walBytes
     }
 }
 
