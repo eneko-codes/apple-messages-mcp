@@ -112,8 +112,8 @@ public enum ToolError: Error, Equatable {
 
                 This schema is private and undocumented, and Apple changes it between
                 releases. That is a bug in this server, not something to configure — the
-                columns it depends on are pinned in its test suite against a fixture
-                database, and one of them has moved.
+                columns it depends on are pinned in its test suite, and one of them has
+                moved.
                 """
 
         case .storeFailure(let detail):
@@ -163,10 +163,11 @@ public enum ToolError: Error, Equatable {
             return """
                 Could not open the Messages database: \(detail)
 
-                Messages holds it open with a write-ahead log, which this server never
-                touches — it opens the file read-only and immutable, so it takes no lock and
-                cannot block the app. An error here means something else: a corrupt file, or
-                a database written by a newer SQLite than this binary links against.
+                Messages holds it open with a write-ahead log, which this server reads but
+                never writes — it opens the file read-only, and a read-only reader in WAL
+                mode does not block the app. An error here means something else: a corrupt
+                file, a database written by a newer SQLite than this binary links against, or
+                a -shm index file this process is not allowed to map.
                 """
         }
     }

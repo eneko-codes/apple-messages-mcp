@@ -4,7 +4,7 @@ import MCP
 public enum MessagesMCPServer {
 
     public static let name = "apple-messages-mcp"
-    public static let version = "1.0.0"
+    public static let version = "1.1.0"
 
     /// Returned from `initialize`. It carries what per-tool descriptions cannot state
     /// once: that reading and sending take different routes with different permissions,
@@ -12,10 +12,11 @@ public enum MessagesMCPServer {
     public static let instructions = """
         Access to Messages on this Mac. Reading and sending take different routes.
 
-        READING comes from the local Messages database, opened read-only and immutable. \
-        That file is protected, so every read tool needs Full Disk Access granted by hand \
-        in System Settings — there is no permission dialog for it and no Info.plist key \
-        that asks. messages_status says whether it is granted and what to do if not.
+        READING comes from the local Messages database, opened read-only and read through \
+        its write-ahead log, so the newest messages are included. That file is protected, \
+        so every read tool needs Full Disk Access granted by hand in System Settings — \
+        there is no permission dialog for it and no Info.plist key that asks. \
+        messages_status says whether it is granted and what to do if not.
 
         The database schema is Apple's and undocumented. It changes between macOS \
         releases, and message text lives in one of two places depending on age, so every \

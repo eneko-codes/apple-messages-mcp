@@ -9,17 +9,37 @@ import SQLite3
 ///
 /// ## Why it can never write
 ///
-/// The file is opened through a URI with `mode=ro&immutable=1`, and the flags exclude
-/// `SQLITE_OPEN_READWRITE`. `mode=ro` refuses writes. `immutable=1` goes further and
-/// promises SQLite the file cannot change underneath it, so SQLite takes **no locks at
-/// all** and never opens the `-wal` or `-shm` sidecars. Messages holds this database
-/// open constantly; a reader that took a lock or checkpointed the WAL would be
-/// interfering with a running app on the owner's own machine.
+/// The file is opened through a URI with `mode=ro`, and the flags exclude
+/// `SQLITE_OPEN_READWRITE`, so SQLite refuses every write. `PRAGMA query_only` is set on
+/// every connection as a second, independent refusal in case the open flags are ever
+/// widened.
 ///
-/// The price of `immutable=1` is honest and worth stating: writes Messages has not yet
-/// checkpointed out of its write-ahead log are invisible here. The newest messages can
-/// lag by seconds to minutes. That is the correct trade — a message that shows up late
-/// is a nuisance, a corrupted archive is not recoverable.
+/// ## Why it reads through the write-ahead log
+///
+/// The file is deliberately **not** opened `immutable=1`. Messages keeps this database in
+/// WAL mode and checkpoints rarely — on the machine this was written on the `-wal` file
+/// was nearly as large as the main file — so a reader that never looks at the log misses
+/// the newest messages. Worse, `immutable=1` is a promise to SQLite that nothing will
+/// change the file; with Messages running that promise is false, and SQLite documents the
+/// consequence: it "might return incorrect query results and/or SQLITE_CORRUPT errors"
+/// (https://www.sqlite.org/uri.html).
+///
+/// What reading the log costs is a shared lock on the `-shm` index for the length of one
+/// read transaction, and SQLite records the reader in that index — so the `-shm` file's
+/// bytes and modification time change when this server reads. It is a coordination file,
+/// never message data. In WAL mode a reader never blocks the writer, and a read-only
+/// connection cannot checkpoint, so Messages keeps writing while this server reads. Every
+/// tool call is one short transaction on its own connection.
+///
+/// ## When there is no log to read
+///
+/// SQLite documents when a read-only connection can open a WAL database: the `-shm` and
+/// `-wal` files exist and are readable, the directory is writable so they can be created,
+/// or the file is opened `immutable` (https://www.sqlite.org/wal.html). A `mode=ro`
+/// connection to a database whose sidecars are gone failed to open when tried, with
+/// `SQLITE_CANTOPEN`. Sidecars are gone only when no connection has the database open —
+/// the last one to close deletes them — and then nothing is changing the file, which is
+/// exactly what `immutable=1` promises. So that, and only that, is when it is used.
 ///
 /// ## Why every column is probed
 ///
@@ -48,11 +68,11 @@ final class ChatDatabase {
 
     // MARK: Opening
 
-    /// SQLite URI for a path, always read-only and immutable.
+    /// SQLite URI for a path, always read-only.
     ///
     /// Static and pure so the one string that decides whether this server can write is
     /// asserted directly in a test rather than inferred from behaviour.
-    static func uri(forPath path: String) -> String {
+    static func uri(forPath path: String, immutable: Bool = false) -> String {
         // Everything outside this set is percent-encoded. '?' would start the query
         // string, '#' the fragment and '%' an escape, so a path containing one of them
         // would otherwise open a different file — or a writable one.
@@ -60,7 +80,20 @@ final class ChatDatabase {
             charactersIn:
                 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/:@!$&'()*+,;=")
         let encoded = path.addingPercentEncoding(withAllowedCharacters: unreserved) ?? path
-        return "file:\(encoded)?mode=ro&immutable=1"
+        return "file:\(encoded)?mode=ro" + (immutable ? "&immutable=1" : "")
+    }
+
+    /// Whether a connection currently has this database open in WAL mode. The `-shm` file
+    /// exists for exactly as long as one does.
+    static func hasJournalSidecars(path: String) -> Bool {
+        FileManager.default.fileExists(atPath: path + "-wal")
+            && FileManager.default.fileExists(atPath: path + "-shm")
+    }
+
+    /// `mode=ro`, through the log, whenever another process has the file open; the
+    /// documented `immutable=1` fallback only when it demonstrably has not.
+    static func openingURI(forPath path: String) -> String {
+        uri(forPath: path, immutable: !hasJournalSidecars(path: path))
     }
 
     /// Distinguishes "not there" from "not allowed" before SQLite is involved.
@@ -69,16 +102,28 @@ final class ChatDatabase {
     /// advice. `open(2)` is the only thing that knows which it is: Full Disk Access
     /// denial surfaces as EPERM, and a hidden parent directory as ENOENT.
     static func probeAccess(path: String) -> DatabaseAccess {
-        let descriptor = open(path, O_RDONLY)
+        let descriptor = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
         if descriptor >= 0 {
             close(descriptor)
             return .granted
         }
-        switch errno {
+        return classify(errno: errno, path: path)
+    }
+
+    static func classify(errno code: Int32, path: String) -> DatabaseAccess {
+        switch code {
         case EPERM, EACCES: return .denied
         case ENOENT, ENOTDIR: return .missing(path: path)
-        default: return .failed(String(cString: strerror(errno)))
+        default: return .failed(String(cString: strerror(code)))
         }
+    }
+
+    /// Apple's SQLite reports a sandbox or TCC refusal as `SQLITE_AUTH` rather than
+    /// `SQLITE_CANTOPEN`, and sometimes only through the system errno.
+    static func isPermissionDenied(code: Int32, systemErrno: Int32) -> Bool {
+        let primary = code & 0xFF
+        return primary == SQLITE_AUTH || primary == SQLITE_PERM
+            || systemErrno == EPERM || systemErrno == EACCES
     }
 
     init(path: String) throws {
@@ -88,17 +133,44 @@ final class ChatDatabase {
         // No SQLITE_OPEN_READWRITE and no SQLITE_OPEN_CREATE: a typo in the path must
         // fail, never conjure an empty database next to the real one.
         let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX
-        let code = sqlite3_open_v2(Self.uri(forPath: path), &pointer, flags, nil)
+        let code = sqlite3_open_v2(Self.openingURI(forPath: path), &pointer, flags, nil)
         guard code == SQLITE_OK, let pointer else {
             let detail = pointer.map { String(cString: sqlite3_errmsg($0)) } ?? "code \(code)"
+            let systemErrno = pointer.map { sqlite3_system_errno($0) } ?? 0
             if pointer != nil { sqlite3_close(pointer) }
+            if Self.isPermissionDenied(code: code, systemErrno: systemErrno) {
+                throw ToolError.notAuthorized(.denied)
+            }
             throw ToolError.notAuthorized(
-                code == SQLITE_CANTOPEN ? Self.probeAccess(path: path) : .failed(detail))
+                code & 0xFF == SQLITE_CANTOPEN ? Self.probeAccess(path: path) : .failed(detail))
         }
         self.handle = pointer
+        try execute("PRAGMA query_only = ON")
     }
 
     deinit { sqlite3_close(handle) }
+
+    // MARK: Transactions
+
+    /// Runs `body` inside one read transaction, so a count and the page it describes are
+    /// taken from the same snapshot even while Messages is writing.
+    func read<T>(_ body: () throws -> T) throws -> T {
+        try execute("BEGIN")
+        do {
+            let value = try body()
+            try execute("COMMIT")
+            return value
+        } catch {
+            _ = sqlite3_exec(handle, "ROLLBACK", nil, nil, nil)
+            throw error
+        }
+    }
+
+    private func execute(_ sql: String) throws {
+        guard sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK else {
+            throw ToolError.storeFailure(String(cString: sqlite3_errmsg(handle)))
+        }
+    }
 
     // MARK: Schema
 

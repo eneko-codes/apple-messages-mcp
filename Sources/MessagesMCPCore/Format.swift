@@ -80,12 +80,13 @@ public struct Format: Sendable {
             Self.block([
                 ("access", ToolError.accessMessage(status.access).split(separator: "\n").first.map(String.init)),
                 ("database", status.databasePath),
-                ("opened", status.openedReadOnly ? "read-only, immutable (never writes, never locks)" : "READ-WRITE — this is a bug"),
+                ("opened", status.openedReadOnly ? "read-only, through the write-ahead log (never writes)" : "READ-WRITE — this is a bug"),
                 ("date unit", status.dateUnit?.rawValue),
                 ("conversations", status.conversationCount.map(String.init)),
                 ("messages", status.messageCount.map(String.init)),
                 ("attachments", status.attachmentCount.map(String.init)),
                 ("newest", status.newestMessageDate.map { timestampWithYear($0) }),
+                ("write-ahead log", status.walBytes.map { "\($0) bytes, read on every call" }),
             ]))
 
         lines.append("")

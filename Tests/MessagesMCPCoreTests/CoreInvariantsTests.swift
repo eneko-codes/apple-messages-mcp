@@ -12,26 +12,52 @@ struct CoreInvariantsTests {
 
     // MARK: Read-only database
 
-    /// `mode=ro&immutable=1` is the one thing that stops this server from ever being
-    /// capable of altering Messages' own storage: `mode=ro` refuses writes, and
-    /// `immutable=1` tells SQLite the file cannot change underneath it, so no lock is
-    /// taken and no `-wal`/`-shm` sidecar is touched.
-    @Test("The chat.db URI is always read-only and immutable")
-    func databaseURIIsReadOnlyAndImmutable() {
+    /// `mode=ro` is what makes SQLite refuse every write, and the URI is deliberately not
+    /// `immutable=1`: that flag skips the write-ahead log and would hide the newest
+    /// messages, and it is a promise that nothing changes the file while Messages is
+    /// running — which is false.
+    @Test("The chat.db URI is read-only and never immutable")
+    func databaseURIIsReadOnly() {
         let uri = ChatDatabase.uri(forPath: "/Users/owner/Library/Messages/chat.db")
-        #expect(uri.hasPrefix("file:"))
-        #expect(uri.hasSuffix("?mode=ro&immutable=1"))
+        #expect(uri == "file:/Users/owner/Library/Messages/chat.db?mode=ro")
+        #expect(!uri.contains("immutable"))
     }
 
     /// An unescaped `?` or `#` in the path would start the query string or fragment
     /// early, letting a crafted path override the mode or open a different file
     /// entirely. Percent-encoding everything outside the unreserved set is what stops
     /// that from ever being possible.
+    @Test("immutable is used only when no process has the database open")
+    func immutableOnlyWithoutSidecars() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("apple-messages-mcp-sidecars-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("chat.db").path
+
+        #expect(ChatDatabase.openingURI(forPath: path).hasSuffix("?mode=ro&immutable=1"))
+        FileManager.default.createFile(atPath: path + "-wal", contents: Data())
+        #expect(ChatDatabase.openingURI(forPath: path).hasSuffix("?mode=ro&immutable=1"))
+        FileManager.default.createFile(atPath: path + "-shm", contents: Data())
+        #expect(ChatDatabase.openingURI(forPath: path).hasSuffix("?mode=ro"))
+    }
+
     @Test("A path with reserved characters cannot smuggle a different mode into the URI")
     func databaseURIEncodesReservedCharacters() {
         let uri = ChatDatabase.uri(forPath: "/tmp/evil?mode=rw#chat.db")
-        #expect(uri.hasSuffix("?mode=ro&immutable=1"))
-        #expect(!uri.contains("evil?mode=rw"))
+        #expect(uri.hasSuffix("?mode=ro"))
+        #expect(uri.components(separatedBy: "?").count == 2)
+        #expect(!uri.contains("#"))
+    }
+
+    @Test("A permission refusal is told apart from a missing file")
+    func errnoClassification() {
+        #expect(ChatDatabase.classify(errno: EPERM, path: "/x") == .denied)
+        #expect(ChatDatabase.classify(errno: EACCES, path: "/x") == .denied)
+        #expect(ChatDatabase.classify(errno: ENOENT, path: "/x") == .missing(path: "/x"))
+        #expect(ChatDatabase.isPermissionDenied(code: 23, systemErrno: 0))  // SQLITE_AUTH
+        #expect(ChatDatabase.isPermissionDenied(code: 14, systemErrno: EPERM))  // CANTOPEN + EPERM
+        #expect(!ChatDatabase.isPermissionDenied(code: 14, systemErrno: ENOENT))
     }
 
     // MARK: Apple absolute time

@@ -5,10 +5,10 @@ import Foundation
 ///
 /// Two doors, deliberately different:
 ///
-/// - **Reading** goes straight to `~/Library/Messages/chat.db`, opened read-only and
-///   immutable. Messages exposes no framework and no useful scripting dictionary, so the
-///   database is the only complete source — and it costs the broadest permission on the
-///   Mac, Full Disk Access.
+/// - **Reading** goes straight to `~/Library/Messages/chat.db`, opened read-only and read
+///   through its write-ahead log. Messages exposes no framework and no useful scripting
+///   dictionary, so the database is the only complete source — and it costs the broadest
+///   permission on the Mac, Full Disk Access.
 /// - **Sending** goes through a shortcut. It could not go through the database in any
 ///   case: inserting a row does not deliver anything, it only forges a record of a
 ///   message that was never sent. Shortcuts is the supported way to hand Messages a real
@@ -40,9 +40,9 @@ public struct SystemMessageStore: MessageStore {
     /// Opened per call rather than held.
     ///
     /// A long-lived handle on a file another application is actively writing buys nothing
-    /// here — with `immutable=1` there is no page cache worth keeping warm and no
-    /// connection state to reuse — and it would keep a descriptor on the owner's archive
-    /// open for the life of the process.
+    /// here — there is no page cache worth keeping warm — and it would keep a read
+    /// snapshot, and so a hold on the write-ahead log, open for the life of the process.
+    /// Each call opens, reads inside one transaction and closes.
     private func open() throws -> ChatDatabase {
         let database = try ChatDatabase(path: databasePath)
         try database.verifySchema()
@@ -58,22 +58,26 @@ public struct SystemMessageStore: MessageStore {
         }
 
         let database = try open()
-        return StoreStatus(
-            access: .granted,
-            databasePath: databasePath,
-            openedReadOnly: true,
-            dateUnit: try database.dateUnit(),
-            conversationCount: try database.count(of: "chat"),
-            messageCount: try database.count(of: "message"),
-            attachmentCount: try database.count(of: "attachment"),
-            newestMessageDate: try database.newestMessageDate(),
-            sendShortcutInstalled: shortcutIsInstalled(sendShortcut))
+        return try database.read {
+            StoreStatus(
+                access: .granted,
+                databasePath: databasePath,
+                openedReadOnly: true,
+                dateUnit: try database.dateUnit(),
+                conversationCount: try database.count(of: "chat"),
+                messageCount: try database.count(of: "message"),
+                attachmentCount: try database.count(of: "attachment"),
+                newestMessageDate: try database.newestMessageDate(),
+                sendShortcutInstalled: shortcutIsInstalled(sendShortcut),
+                walBytes: walBytes())
+        }
     }
 
     public func conversations(query: String?, limit: Int, offset: Int) async throws
         -> ConversationPage
     {
-        let all = try open().conversations()
+        let database = try open()
+        let all = try database.read { try database.conversations() }
         var matches = all
         if let needle = query, !needle.isEmpty {
             matches = all.filter { conversation in
@@ -95,47 +99,59 @@ public struct SystemMessageStore: MessageStore {
 
     public func conversation(id: Int64, limit: Int, offset: Int) async throws -> MessagePage {
         let database = try open()
-        guard try database.conversationExists(id: id) else {
-            throw ToolError.conversationNotFound(id: id)
+        return try database.read {
+            guard try database.conversationExists(id: id) else {
+                throw ToolError.conversationNotFound(id: id)
+            }
+            let total = try database.messageCount(inConversation: id)
+            let rows = try database.messages(inConversation: id, limit: limit, offset: offset)
+            let label = try database.chatLabels(ids: [id])[id]
+            return MessagePage(
+                messages: rows.map { $0.labelled(label) },
+                scanned: rows.count, hitScanCeiling: false, total: total)
         }
-        let total = try database.messageCount(inConversation: id)
-        let rows = try database.messages(inConversation: id, limit: limit, offset: offset)
-        let label = try database.chatLabels(ids: [id])[id]
-        return MessagePage(
-            messages: rows.map { $0.labelled(label) },
-            scanned: rows.count, hitScanCeiling: false, total: total)
     }
 
     public func search(_ filter: MessageFilter, limit: Int, offset: Int) async throws
         -> MessagePage
     {
         let database = try open()
-        if let chatID = filter.chatID, try !database.conversationExists(id: chatID) {
-            throw ToolError.conversationNotFound(id: chatID)
+        return try database.read {
+            if let chatID = filter.chatID, try !database.conversationExists(id: chatID) {
+                throw ToolError.conversationNotFound(id: chatID)
+            }
+
+            let handleIDs = try filter.participant.map { try database.handleIDs(matching: $0) }
+            let wanted = limit + offset
+            var kept: [MessageRecord] = []
+
+            let scan = try database.scanMessages(
+                chatID: filter.chatID, handleIDs: handleIDs, service: filter.service,
+                hasAttachment: filter.hasAttachment, fromMe: filter.fromMe,
+                ceiling: filter.scanCeiling
+            ) { record in
+                if filter.accepts(record) { kept.append(record) }
+                return kept.count < wanted
+            }
+
+            let page = Array(kept.dropFirst(offset))
+            let labels = try database.chatLabels(ids: page.compactMap(\.chatID))
+            return MessagePage(
+                messages: page.map { $0.labelled($0.chatID.flatMap { labels[$0] }) },
+                scanned: scan.scanned, hitScanCeiling: scan.hitCeiling, total: nil)
         }
-
-        let handleIDs = try filter.participant.map { try database.handleIDs(matching: $0) }
-        let wanted = limit + offset
-        var kept: [MessageRecord] = []
-
-        let scan = try database.scanMessages(
-            chatID: filter.chatID, handleIDs: handleIDs, service: filter.service,
-            hasAttachment: filter.hasAttachment, fromMe: filter.fromMe,
-            ceiling: filter.scanCeiling
-        ) { record in
-            if filter.accepts(record) { kept.append(record) }
-            return kept.count < wanted
-        }
-
-        let page = Array(kept.dropFirst(offset))
-        let labels = try database.chatLabels(ids: page.compactMap(\.chatID))
-        return MessagePage(
-            messages: page.map { $0.labelled($0.chatID.flatMap { labels[$0] }) },
-            scanned: scan.scanned, hitScanCeiling: scan.hitCeiling, total: nil)
     }
 
     public func attachments(messageIDs: [Int64]) async throws -> [AttachmentRecord] {
-        try open().attachments(messageIDs: messageIDs)
+        let database = try open()
+        return try database.read { try database.attachments(messageIDs: messageIDs) }
+    }
+
+    /// Size of the write-ahead log, read with `stat`. This server reads through it, so
+    /// this is how much of the newest history has not yet reached the main file.
+    private func walBytes() -> Int64? {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: databasePath + "-wal")
+        return (attributes?[.size] as? NSNumber)?.int64Value
     }
 
     // MARK: Sending
