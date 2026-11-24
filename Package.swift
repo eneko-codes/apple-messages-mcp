@@ -4,9 +4,6 @@ import PackageDescription
 let package = Package(
     name: "apple-messages-mcp",
     platforms: [.macOS(.v15)],
-    dependencies: [
-        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.1")
-    ],
     targets: [
         // All logic lives here so the tests can import it. The executable target below
         // is only a launcher: an executable target cannot be imported by a test target.
@@ -14,10 +11,7 @@ let package = Package(
         // SQLite is `import SQLite3` from the macOS SDK — the system library the Messages
         // store is written with. No package dependency: a wrapper would add a few thousand
         // lines to audit in exchange for syntax.
-        .target(
-            name: "MessagesMCPCore",
-            dependencies: [.product(name: "MCP", package: "swift-sdk")]
-        ),
+        .target(name: "MessagesMCPCore"),
         .executableTarget(
             name: "apple-messages-mcp",
             dependencies: ["MessagesMCPCore"],

@@ -1,5 +1,4 @@
 import Foundation
-import MCP
 
 /// Routes a `tools/call` to the store and renders the answer.
 ///
@@ -7,7 +6,7 @@ import MCP
 /// `MessageStore`, which is what lets the tests drive every branch below against an
 /// in-memory double with no Full Disk Access, no database and no message ever leaving
 /// the process.
-public struct MessageTools: Sendable {
+public struct MessageTools: ToolHandler {
     private let store: any MessageStore
     private let calendar: Calendar
     private let format: Format
@@ -18,27 +17,21 @@ public struct MessageTools: Sendable {
         self.format = Format(calendar: calendar)
     }
 
-    public func handle(_ parameters: CallTool.Parameters) async -> CallTool.Result {
+    public func handle(_ parameters: ToolCall) async -> ToolOutput {
         let started = ContinuousClock.now
         do {
-            let text = try await run(parameters)
-            return .init(content: [.text(text: text, annotations: nil, _meta: nil)], isError: false)
+            return ToolOutput(text: try await run(parameters), isError: false)
         } catch let error as ToolError {
             Diagnostics.toolFailed(parameters.name, error: error, since: started)
-            return .init(
-                content: [.text(text: error.message, annotations: nil, _meta: nil)], isError: true)
+            return ToolOutput(text: error.message, isError: true)
         } catch {
             Diagnostics.toolFailed(parameters.name, error: error, since: started)
-            return .init(
-                content: [
-                    .text(
-                        text: ToolError.storeFailure(error.localizedDescription).message,
-                        annotations: nil, _meta: nil)
-                ], isError: true)
+            return ToolOutput(
+                text: ToolError.storeFailure(error.localizedDescription).message, isError: true)
         }
     }
 
-    private func run(_ parameters: CallTool.Parameters) async throws -> String {
+    private func run(_ parameters: ToolCall) async throws -> String {
         let arguments = Arguments(parameters.arguments, calendar: calendar)
 
         // Reported before the access check, because "what is wrong and how do I fix it"

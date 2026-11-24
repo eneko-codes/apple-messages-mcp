@@ -1,10 +1,9 @@
 import Foundation
-import MCP
 
 public enum MessagesMCPServer {
 
     public static let name = "apple-messages-mcp"
-    public static let version = "1.1.0"
+    public static let version = "1.1.1"
 
     /// Returned from `initialize`. It carries what per-tool descriptions cannot state
     /// once: that reading and sending take different routes with different permissions,
@@ -41,25 +40,14 @@ public enum MessagesMCPServer {
 
     /// The store is a parameter so the whole server can be driven by a double. Nothing
     /// in this function opens a database by itself.
-    public static func run(store: any MessageStore = SystemMessageStore()) async throws {
-        let tools = MessageTools(store: store)
-        let server = Server(
-            name: name,
-            version: version,
-            instructions: instructions,
-            capabilities: .init(tools: .init(listChanged: false))
-        )
-
-        await server.withMethodHandler(ListTools.self) { _ in
-            .init(tools: ToolCatalog.all())
-        }
-        await server.withMethodHandler(CallTool.self) { await tools.handle($0) }
-
-        // The default StdioTransport logger is a no-op handler. Leave it that way: a
-        // logger writing to stdout would interleave with the JSON-RPC stream and break
-        // every response after the first log line.
+    public static func run(store: any MessageStore = SystemMessageStore()) async {
         Diagnostics.started(version: version)
-        try await server.start(transport: StdioTransport())
-        await server.waitUntilCompleted()
+        await serveStandardStreams(handler: handler(tools: MessageTools(store: store)))
+    }
+
+    public static func handler(tools: MessageTools) -> MCPHandler {
+        MCPHandler(
+            name: name, version: version, instructions: instructions,
+            catalog: ToolCatalog.all(), tools: tools)
     }
 }
