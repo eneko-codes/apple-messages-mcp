@@ -14,17 +14,24 @@ public protocol MessageStore: Sendable {
 
     func status(sendShortcut: String) async throws -> StoreStatus
 
-    /// `query` matches the display name, the chat identifier and the participants.
+    /// `query` matches the display name, the chat identifier and the participants. The
+    /// one with the newest message first, ties by highest id, so that a page boundary
+    /// falls in the same place on the next call.
     func conversations(query: String?, limit: Int, offset: Int) async throws -> ConversationPage
 
     /// Newest first. A thread is read backwards from now — that is the direction a person
     /// reads one, and it is the only direction in which a first page is useful.
     func conversation(id: Int64, limit: Int, offset: Int) async throws -> MessagePage
 
+    /// Newest first, reading no more rows than the page needs: the scan stops one match
+    /// past the page (`hasMore`), at the end of the data (`total` is then every match), or
+    /// at `filter.scanCeiling` rows read (`hitScanCeiling`, with `oldestScanned` saying how
+    /// far back it got).
     func search(_ filter: MessageFilter, limit: Int, offset: Int) async throws -> MessagePage
 
     /// Bulk, because attachments are looked up for a page of messages at a time and one
-    /// call per message would be a round trip per row.
+    /// call per message would be a round trip per row. Every attachment of the messages
+    /// given, which is why the tool above bounds how many ids one call takes.
     func attachments(messageIDs: [Int64]) async throws -> [AttachmentRecord]
 
     /// IRREVERSIBLE. There is no recall, no undo and no edit window: once Messages hands

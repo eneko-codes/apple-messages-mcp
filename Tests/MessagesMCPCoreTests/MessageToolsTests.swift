@@ -158,7 +158,7 @@ struct MessageToolsTests {
             ToolCatalog.searchName,
             [
                 "query": .string("bread"), "participant": .string("+34600000001"),
-                "from": .string("2026-08-01"), "to": .string("2026-08-09"),
+                "from_date": .string("2026-08-01"), "to_date": .string("2026-08-09"),
                 "has_attachment": .bool(false),
             ],
             store: store)
@@ -171,12 +171,12 @@ struct MessageToolsTests {
 
     /// A plain day read literally would exclude that whole day, so a one-day window would
     /// always come back empty.
-    @Test("A plain day as 'to' covers that whole day")
+    @Test("A plain day as 'to_date' covers that whole day")
     func rangeEndCoversTheDay() async {
         let store = stocked()
         _ = await call(
             ToolCatalog.searchName,
-            ["query": .string("bread"), "to": .string("2026-08-09")], store: store)
+            ["query": .string("bread"), "to_date": .string("2026-08-09")], store: store)
         let to = store.lastFilter?.to
         #expect(to != nil)
         #expect((to ?? .distantPast) > Fixtures.date(2026, 8, 9, 23, 0))
@@ -186,7 +186,7 @@ struct MessageToolsTests {
     func invertedRangeIsRefused() async {
         let (_, isError) = await call(
             ToolCatalog.searchName,
-            ["from": .string("2026-08-09"), "to": .string("2026-08-01")], store: stocked())
+            ["from_date": .string("2026-08-09"), "to_date": .string("2026-08-01")], store: stocked())
         #expect(isError)
     }
 

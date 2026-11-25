@@ -30,17 +30,47 @@ public struct Format: Sendable {
         }.joined(separator: "\n")
     }
 
-    /// Collapses a body onto one line for a list row.
-    ///
-    /// A message can be a paragraph. The one-line-per-result contract is what makes a
-    /// page of results scannable, and the full text is one `conversation_get` away.
-    static func oneLine(_ text: String, limit: Int = 120) -> String {
-        let flattened = text.split(separator: "\n", omittingEmptySubsequences: true)
+    /// A body on one line, however many it was written on.
+    static func flattened(_ text: String) -> String {
+        text.split(separator: "\n", omittingEmptySubsequences: true)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .joined(separator: " ⏎ ")
-        guard flattened.count > limit else { return flattened }
-        return String(flattened.prefix(limit - 1)) + "…"
+    }
+
+    /// Collapses a text onto one line of at most `width` characters for a list row.
+    ///
+    /// A message can be a paragraph. The one-line-per-result contract is what makes a
+    /// page of results scannable, and what keeps a page of rows inside a result.
+    static func oneLine(_ text: String, width: Int) -> String {
+        let flattened = flattened(text)
+        guard flattened.count > width else { return flattened }
+        return String(flattened.prefix(width - 1)) + "…"
+    }
+
+    /// Whether a row shows less than the whole text of this message.
+    static func isClipped(_ record: MessageRecord) -> Bool {
+        flattened(body(of: record)).count > Configuration.textWidth
+    }
+
+    /// Goes before the rows when one of them shows less than its whole text.
+    ///
+    /// Its own wording, not `Notice.clipped`: that form names the tool that reads one item
+    /// in full, and this server has none. Until it does, the sentence says so, because a
+    /// reader told only that text was clipped would go looking for the rest.
+    static let clippedNotice = """
+        Text is clipped to \(Configuration.textWidth) characters in each row. No tool of \
+        this server reads one message in full.
+        """
+
+    /// What a listing shows in place of rows, so that "nothing matched" is never taken
+    /// for "nothing at this offset".
+    static func nothing(_ none: String, matching: Int) -> String {
+        matching == 0 ? none : "(nothing at this offset)"
+    }
+
+    static func plural(_ count: Int, _ noun: String) -> String {
+        "\(count) \(noun)\(count == 1 ? "" : "s")"
     }
 
     func timestamp(_ date: Date?) -> String {
@@ -105,11 +135,18 @@ public struct Format: Sendable {
 
         lines.append("")
         lines.append("LIMITS")
+        func page(_ fallback: Int, _ range: ClosedRange<Int>) -> String {
+            "\(fallback) by default, \(range.upperBound) at most"
+        }
         lines.append(
             Self.block([
-                ("search limit", String(Configuration.searchLimit)),
-                ("scan ceiling", String(Configuration.scanLimit)),
+                ("conversations per page", page(Configuration.defaultConversationLimit, Configuration.conversationLimitRange)),
+                ("messages per page", page(Configuration.defaultMessageLimit, Configuration.messageLimitRange)),
+                ("attachments per page", page(Configuration.defaultAttachmentLimit, Configuration.attachmentLimitRange)),
+                ("text shown per message", "\(Configuration.textWidth) characters"),
+                ("scan ceiling", "\(Configuration.scanLimit) messages per search"),
                 ("max send length", "\(Configuration.maximumSendCharacters) characters"),
+                ("call deadline", "\(MessageTools.defaultTimeout.components.seconds) seconds"),
             ]))
 
         lines.append("")
@@ -122,152 +159,148 @@ public struct Format: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    public func conversations(_ page: ConversationPage, offset: Int, query: String?) -> String {
-        let scope = query.map { " · matching \"\($0)\"" } ?? ""
-        let header = "\(page.total) conversation\(page.total == 1 ? "" : "s")\(scope)"
-        guard !page.conversations.isEmpty else {
-            return header + "\nNothing matched. conversations_list with no query lists them all."
+    /// `rows` is the page, `total` every conversation that matched.
+    public func conversations(_ rows: [Conversation], total: Int, query: String?) -> String {
+        let scope = query.map { " matching \"\(ToolStandard.echo($0))\"" } ?? ""
+        let header = "Conversations\(scope): \(total), ordered by latest message (newest first), then highest id."
+        guard !rows.isEmpty else {
+            let none =
+                query == nil
+                ? "Messages holds no conversations."
+                : "Nothing matched. conversations_list with no query lists them all."
+            return header + "\n" + Self.nothing(none, matching: total)
         }
 
-        let whenWidth = page.conversations.map { timestamp($0.lastMessageDate).count }.max() ?? 0
-        let labelWidth = min(page.conversations.map(\.label.count).max() ?? 0, 44)
+        let whenWidth = rows.map { timestamp($0.lastMessageDate).count }.max() ?? 0
+        // Never cut: this list is the only place a conversation's name and participants
+        // are shown, so a clipped one could not be read anywhere else.
+        let labels = rows.map { Self.flattened($0.label) }
+        let labelWidth = min(labels.map(\.count).max() ?? 0, Configuration.labelColumnWidth)
 
         var lines = [header]
-        for conversation in page.conversations {
+        for (conversation, label) in zip(rows, labels) {
             var line = Self.pad(timestamp(conversation.lastMessageDate), to: whenWidth)
-            line += "  " + Self.pad(Self.oneLine(conversation.label, limit: 44), to: labelWidth)
+            line += "  " + Self.pad(label, to: labelWidth)
             line += "  " + (conversation.isGroup ? "group" : "1:1  ")
             line += "  " + Self.pad("\(conversation.messageCount) msg", to: 10)
             if conversation.unreadCount > 0 { line += "  \(conversation.unreadCount) unread" }
             if let service = conversation.serviceName, !service.isEmpty { line += "  \(service)" }
-            lines.append(line + "  id=\(conversation.id)")
-        }
-
-        let shown = offset + page.conversations.count
-        if shown < page.total {
-            lines.append("…\(page.total - shown) more · call again with offset=\(shown)")
+            line += "  id=\(conversation.id)"
+            // A named conversation's label is its name, so who is in it goes last.
+            if let name = conversation.displayName, !name.isEmpty, !conversation.participants.isEmpty {
+                line += "  with " + conversation.participants.joined(separator: ", ")
+            }
+            lines.append(line)
         }
         return lines.joined(separator: "\n")
     }
 
     /// Newest first, and it says so — a transcript printed in the opposite order to the
-    /// one a reader expects is read wrongly before anyone notices the header.
-    public func conversationPage(
-        _ page: MessagePage, conversationID: Int64, offset: Int, limit: Int
-    ) -> String {
-        let label = page.messages.first?.chatLabel ?? "conversation \(conversationID)"
-        var header = "\(label) · id=\(conversationID)"
-        if let total = page.total { header += " · \(total) messages" }
-        header += " · newest first"
+    /// one a reader expects is read wrongly before anyone notices the header. `rows` is
+    /// the page, `total` every message of the thread.
+    public func conversationPage(_ rows: [MessageRecord], conversationID: Int64, total: Int) -> String {
+        let label = rows.first?.chatLabel.map { Self.flattened($0) }
+        let header =
+            "\(label ?? "conversation \(conversationID)") · id=\(conversationID) · "
+            + "\(Self.plural(total, "message")), ordered newest first, then highest id."
 
-        guard !page.messages.isEmpty else {
-            return header + "\n" + (offset > 0
-                ? "Nothing at offset \(offset); the thread is shorter than that."
-                : "This conversation has no messages.")
+        guard !rows.isEmpty else {
+            return header + "\n" + Self.nothing("This conversation has no messages.", matching: total)
         }
 
         var lines = [header]
-        let whenWidth = page.messages.map { timestamp($0.date).count }.max() ?? 0
-        let whoWidth = page.messages.map { Self.who($0).count }.max() ?? 0
+        let whenWidth = rows.map { timestamp($0.date).count }.max() ?? 0
+        let whoWidth = Self.senderColumn(rows)
 
-        for record in page.messages {
+        for record in rows {
             var line = Self.pad(timestamp(record.date), to: whenWidth)
             line += "  " + Self.pad(Self.who(record), to: whoWidth)
-            line += "  " + Self.oneLine(Self.body(of: record), limit: 160)
+            line += "  " + Self.oneLine(Self.body(of: record), width: Configuration.textWidth)
             if record.hasAttachments { line += "  📎" }
             if record.dateEdited != nil { line += "  (edited)" }
             lines.append(line + "  id=\(record.id)")
         }
-
-        if let total = page.total {
-            let shown = offset + page.messages.count
-            if shown < total {
-                lines.append(
-                    "…\(total - shown) older · call again with offset=\(shown) (limit \(limit))")
-            }
-        }
         return lines.joined(separator: "\n")
     }
 
+    /// The sender's address whole, however long: it is what `participant` takes.
     static func who(_ record: MessageRecord) -> String {
         if record.isFromMe { return "me" }
-        return record.handle ?? "them"
+        return record.handle.map { flattened($0) } ?? "them"
     }
 
-    public func searchResults(
-        _ page: MessagePage, filter: MessageFilter, offset: Int, scanLimit: Int
-    ) -> String {
+    static func senderColumn(_ rows: [MessageRecord]) -> Int {
+        min(rows.map { who($0).count }.max() ?? 0, Configuration.senderColumnWidth)
+    }
+
+    /// `rows` is the page; `page` says how the scan that found it went.
+    public func searchResults(_ rows: [MessageRecord], page: MessagePage, filter: MessageFilter) -> String {
         var criteria: [String] = []
-        if let query = filter.query { criteria.append("text \"\(query)\"") }
-        if let participant = filter.participant { criteria.append("with \(participant)") }
+        if let query = filter.query { criteria.append("text \"\(ToolStandard.echo(query))\"") }
+        if let participant = filter.participant {
+            criteria.append("with \(ToolStandard.echo(participant))")
+        }
         if let chatID = filter.chatID { criteria.append("in conversation \(chatID)") }
         if let from = filter.from {
             criteria.append("from \(DateParsing.roundTrip(from, calendar: calendar))")
         }
         if let to = filter.to {
-            criteria.append("to \(DateParsing.roundTrip(to, calendar: calendar))")
+            criteria.append("before \(DateParsing.roundTrip(to, calendar: calendar))")
         }
         if let hasAttachment = filter.hasAttachment {
             criteria.append(hasAttachment ? "with attachments" : "without attachments")
         }
-        if let service = filter.service { criteria.append("service \(service)") }
+        if let service = filter.service { criteria.append("service \(ToolStandard.echo(service))") }
         if let fromMe = filter.fromMe { criteria.append(fromMe ? "sent by me" : "received") }
 
-        let header =
-            "\(page.messages.count) match\(page.messages.count == 1 ? "" : "es") · "
-            + (criteria.isEmpty ? "no filters" : criteria.joined(separator: " · "))
-            + " · \(calendar.timeZone.identifier) · scanned \(page.scanned) rows"
+        var scan = "Scanned \(Self.plural(page.scanned, "message"))"
+        if let oldest = page.oldestScanned {
+            scan += " back to \(DateParsing.roundTrip(oldest, calendar: calendar))"
+        }
+        var lines = [
+            "Messages: \(rows.count) shown · "
+                + (criteria.isEmpty ? "no filters" : criteria.joined(separator: " · "))
+                + " · times in \(calendar.timeZone.identifier)",
+            "\(scan). Ordered newest first, then highest id.",
+        ]
 
-        guard !page.messages.isEmpty else {
-            var empty = [header, "No messages matched."]
-            if page.hitScanCeiling {
-                empty.append(
-                    "The scan stopped at \(scanLimit) rows before reaching the end of the "
-                        + "archive, so older matches may exist. Narrow it with participant, "
-                        + "conversation_id or a date range.")
-            }
-            return empty.joined(separator: "\n")
+        guard !rows.isEmpty else {
+            // With no total the scan stopped on a match past this page, so some matched.
+            lines.append(Self.nothing("No messages matched.", matching: page.total ?? 1))
+            return lines.joined(separator: "\n")
         }
 
-        var lines = [header]
-        let whenWidth = page.messages.map { timestampWithYear($0.date).count }.max() ?? 0
-        let whoWidth = page.messages.map { Self.who($0).count }.max() ?? 0
+        let whenWidth = rows.map { timestampWithYear($0.date).count }.max() ?? 0
+        let whoWidth = Self.senderColumn(rows)
 
-        for record in page.messages {
+        for record in rows {
             var line = Self.pad(timestampWithYear(record.date), to: whenWidth)
             line += "  " + Self.pad(Self.who(record), to: whoWidth)
             if let label = record.chatLabel, !label.isEmpty {
-                line += "  [" + Self.oneLine(label, limit: 28) + "]"
+                line += "  [" + Self.flattened(label) + "]"
             }
-            line += "  " + Self.oneLine(Self.body(of: record), limit: 140)
+            line += "  " + Self.oneLine(Self.body(of: record), width: Configuration.textWidth)
             if record.hasAttachments { line += "  📎" }
             lines.append(line + "  id=\(record.id)")
-        }
-
-        // A truncated answer that does not say it is truncated is a wrong answer.
-        if page.hitScanCeiling {
-            lines.append(
-                "…the scan stopped at \(scanLimit) rows, so this is the newest slice of the "
-                    + "archive and not all of it. Narrow the filters or page with offset.")
-        } else if page.messages.count >= 1 {
-            lines.append(
-                "Page starts at offset \(offset). More may exist: call again with "
-                    + "offset=\(offset + page.messages.count).")
         }
         return lines.joined(separator: "\n")
     }
 
-    public func attachments(_ records: [AttachmentRecord], requested: [Int64]) -> String {
-        guard !records.isEmpty else {
-            return
-                "No attachments on message\(requested.count == 1 ? "" : "s") "
-                + requested.map(String.init).joined(separator: ", ") + "."
+    /// `rows` is the page, `total` every attachment on the `requested` messages.
+    public func attachments(_ rows: [AttachmentRecord], total: Int, requested: Int) -> String {
+        let header =
+            "Attachments: \(total) on \(Self.plural(requested, "message")) given, "
+            + "ordered by message id, then attachment id."
+        guard !rows.isEmpty else {
+            let none = requested == 1
+                ? "That message has no attachment." : "None of those messages has an attachment."
+            return header + "\n" + Self.nothing(none, matching: total)
         }
 
-        var lines = ["\(records.count) attachment\(records.count == 1 ? "" : "s")"]
-        for record in records {
+        var lines = [header]
+        for record in rows {
             let size = record.totalBytes > 0 ? Self.bytes(record.totalBytes) : "size unknown"
-            var rows: [(String, String?)] = [
+            var fields: [(String, String?)] = [
                 ("message", String(record.messageID)),
                 ("name", record.transferName),
                 ("type", [record.mimeType, record.uti].compactMap { $0 }.joined(separator: " · ")),
@@ -278,10 +311,10 @@ public struct Format: Sendable {
             ]
             if !record.existsOnDisk {
                 // Common: iCloud offloads old attachments and leaves the row behind.
-                rows.append(("on disk", "NO — the file is gone or offloaded to iCloud"))
+                fields.append(("on disk", "NO — the file is gone or offloaded to iCloud"))
             }
             lines.append("")
-            lines.append(Self.block(rows))
+            lines.append(Self.block(fields))
         }
         lines.append("")
         lines.append(
@@ -302,20 +335,47 @@ public struct Format: Sendable {
             ? "\(count) B" : String(format: "%.1f %@", value, units[index])
     }
 
+    /// The receipt repeats the text that was sent and what the shortcut printed. Both are
+    /// windows from the start, shrunk together when the receipt would not fit a result:
+    /// characters that take many UTF-16 units each can make even a short text long.
+    ///
+    /// Neither window can be continued, so each says why in its own words, where
+    /// `Notice.window` would name an argument to pass: this tool has none, and a second
+    /// call would send a second message.
     public func sent(_ receipt: SendReceipt) -> String {
-        var lines = ["Sent. This cannot be recalled."]
-        lines.append("")
-        lines.append(
-            Self.block([
-                ("to", receipt.recipient),
-                ("via", "shortcut \"\(receipt.shortcutName)\""),
-                ("text", receipt.text),
-                ("shortcut said", receipt.output),
-            ]))
-        lines.append("")
-        lines.append(
-            "Whether it arrived is Messages' business, not this server's — check the "
-                + "conversation in Messages if delivery matters.")
-        return lines.joined(separator: "\n")
+        let outputTotal = receipt.output?.count ?? 0
+        let widest = max(receipt.text.count, min(outputTotal, Configuration.shortcutOutputWidth), 1)
+        return ToolStandard.fitting(widest) { size in
+            let text = String(receipt.text.prefix(size))
+            let output = receipt.output.map {
+                String($0.prefix(min(size, Configuration.shortcutOutputWidth)))
+            }
+            var notices: [String] = []
+            if text.count < receipt.text.count {
+                notices.append(
+                    "Text: characters 1–\(text.count) of \(receipt.text.count). All of it was "
+                        + "sent; the rest is the text given in the call.")
+            }
+            if let output, output.count < outputTotal {
+                notices.append(
+                    "Shortcut output: characters 1–\(output.count) of \(outputTotal). The rest "
+                        + "cannot be read: calling send_message again would send the message again.")
+            }
+
+            var lines = ["Sent. This cannot be recalled."]
+            lines.append("")
+            lines.append(
+                Self.block([
+                    ("to", receipt.recipient),
+                    ("via", "shortcut \"\(receipt.shortcutName)\""),
+                    ("text", text),
+                    ("shortcut said", output),
+                ]))
+            lines.append("")
+            lines.append(
+                "Whether it arrived is Messages' business, not this server's — check the "
+                    + "conversation in Messages if delivery matters.")
+            return ToolStandard.withNotices(notices, lines.joined(separator: "\n"))
+        }
     }
 }

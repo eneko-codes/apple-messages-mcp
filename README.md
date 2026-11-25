@@ -31,11 +31,11 @@ Not affiliated with or endorsed by Apple Inc.
 
 | Tool | Kind | What it does |
 |---|---|---|
-| `messages_status` | read | Reports whether the database can be read, whether the send shortcut exists, and the exact path of the binary to add to Full Disk Access. Reads no messages. |
-| `conversations_list` | read | Every conversation, newest-activity first: participants, whether it's a group, message count, unread count, id. |
-| `conversation_get` | read | One page of a thread, newest first: sender, timestamp, text and id of each message. Page backwards with `offset`. |
-| `messages_search` | read | Finds messages across the whole archive, newest first. Filters combine with AND. |
-| `message_attachments` | read | What is attached to given message ids: file name, type, size, direction, path on disk, and whether the file is still there. |
+| `messages_status` | read | Reports whether the database can be read, whether the send shortcut exists, the limits the other tools work to, and the exact path of the binary to add to Full Disk Access. Reads no messages. |
+| `conversations_list` | read | Conversations a page at a time, the one with the newest message first: participants, whether it's a group, message count, unread count, id. |
+| `conversation_get` | read | A page of a thread, newest first: sender, timestamp, text and id of each message. `limit` and `offset` go further back. |
+| `messages_search` | read | Finds messages across every conversation, newest first, a page at a time. Filters combine with AND; `from_date` and `to_date` are inclusive. |
+| `message_attachments` | read | What is attached to given message ids, a page at a time: file name, type, size, direction, path on disk, and whether the file is still there. |
 | `send_message` | **irreversible** | Sends an iMessage or SMS by running the configured shortcut. Requires `confirm: true`. |
 
 ## Frameworks and APIs
@@ -55,6 +55,23 @@ busy handler, and every Apple-event API — this server drives no app.
 
 ## The rules worth knowing before you use it
 
+**Every result is bounded, and says what it left out.** Conversations, messages and
+attachments come one page at a time, in an order the result states. When a result does not
+hold everything, its first lines say how much there is and the exact arguments that return
+the rest: `limit` and `offset`. A `limit` or an `offset` outside its range is moved to the
+nearest allowed value and the first lines say which one was used. An id outside its range
+is refused instead, because the nearest one would be another conversation or message, and
+so is a list of more than 200 message ids. A message's text is shown on one line of at most
+160 characters; when a longer one was clipped the first lines say so. The sizes are
+constants in `Configuration.swift`, which the schemas, the descriptions and the
+instructions quote. No result is longer than `ToolStandard.longestResult`: each tool keeps
+to that itself, and the protocol layer cuts, with a notice, any result that did not.
+
+**Every call is bounded too.** A call that has not finished after 50 seconds is abandoned
+and answered with an error that says so. The `shortcuts` tool is stopped sooner: after 10
+seconds when listing the shortcuts, after 30 when running one. For `send_message` any of
+those errors means the message may or may not have been sent.
+
 **Sending never touches the database.** `send_message` could not go through
 `chat.db` in any case — inserting a row there would not deliver anything, it would only
 forge a record of a message nobody sent. The Shortcuts app is the supported route to a
@@ -71,8 +88,10 @@ been removed in favour of plug-and-play. The only guards left on `send_message` 
 allow/ask/prohibit switch in Claude Desktop — set it to "ask" to approve every send by
 hand, or "prohibit" to disable sending entirely. Beyond that, it is the calling agent's
 own judgement before it calls the tool. Sending **cannot be undone**: there is no
-recall, and the recipient may read it immediately. A body over 4,000 characters is
-refused before anything is sent.
+recall, and the recipient may read it immediately. A body over 4,000 characters, or a
+recipient over 320, is refused before anything is sent. The receipt repeats the recipient,
+the text and the first 2,000 characters of whatever the shortcut printed; the rest of that
+output cannot be read afterwards, because a second call would send a second message.
 
 **The database is opened `mode=ro`, and deliberately not `immutable=1`.** Messages keeps
 it in WAL mode and checkpoints rarely, so the newest messages often live only in the
@@ -95,10 +114,10 @@ uses `immutable=1`.
 
 **Message text lives in two places.** Older rows carry plain `text`; newer ones carry
 only a typed-stream `attributedBody` blob that SQL cannot search inside, so text
-matching in `messages_search` happens after each body is decoded. Every message reports
-which source its text came from (`bodySource`), so a future change to that archive
-format shows up as an unexpected value rather than as messages that quietly have no
-text.
+matching in `messages_search` happens after each body is decoded. Every record carries
+which source its text came from (`bodySource`), and a message with no text in either
+place is shown as such, so a future change to that archive format shows up as rows marked
+as having no text rather than as blank lines.
 
 **Dates are Apple absolute time** — nanoseconds since 2001-01-01 on modern macOS,
 seconds on older systems — decided per record; getting the unit wrong would shift every
@@ -240,11 +259,21 @@ both at once: two registrations under the same display name collide, and
 
 ## Known limits
 
-- **A search can be truncated.** Because text lives in a binary blob SQL cannot filter,
-  `messages_search` reads rows until it has a page or has scanned 20,000 of them,
-  whichever comes first, and always reports how many it read. A truncated result is the
-  **newest** matches, never a random subset — narrow the search with `participant`,
-  `conversation_id` or a date range rather than trusting an unbounded one.
+- **A search can stop early.** Because text lives in a binary blob SQL cannot filter,
+  `messages_search` reads messages newest first until it has a page or has read 20,000 of
+  them, whichever comes first, and always reports how many it read and back to which
+  date. When it stops at the ceiling, the first line of the result says so and gives the
+  `to_date` that goes on from the oldest message read. `conversation_id`, `participant`,
+  `from_date`, `to_date`, `has_attachment`, `service` and `from_me` choose which messages
+  are read, so they move the ceiling; `query` does not.
+- **`to_date` is inclusive at the precision it is written in.** `2026-08-12` covers that
+  whole day, `2026-08-12T09:00` that whole minute, `2026-08-12T09:00:07` that second. A
+  date that does not exist (30 February, an hour a clock change skips) is refused.
+- **No tool reads one message in full.** `conversation_get` and `messages_search` show
+  each text on one line of at most 160 characters. A longer message is clipped, the result
+  says so, and the rest of it cannot be read through this server.
+- **Each page is a new read.** A message that arrives between two calls moves every row of
+  a thread one place down, so the next page can repeat the last row of the one before.
 - **A message written a moment ago can be missing.** Reads go through the write-ahead
   log, but a transaction Messages has not committed yet is not visible. `messages_status`
   reports the size of the log.
@@ -265,10 +294,12 @@ swift build
 swift test
 ```
 
-The suite runs against an in-memory fake (`FakeMessageStore`) and against a database it
+The suite runs against an in-memory fake (`FakeMessageStore`), against a database it
 invents in a temporary directory with the tables and columns the reader uses, including
-rows left only in the write-ahead log — no Full Disk Access, no real database, and no
-message ever leaves the process. See `CLAUDE.md`, whose first
+rows left only in the write-ahead log, and against a shell script it writes to stand in
+for `/usr/bin/shortcuts` — no Full Disk Access, no real database, no real shortcut, and no
+message ever leaves the process. `BoundsTests` holds every bound, notice and length of the
+tool standard to the constants. See `CLAUDE.md`, whose first
 section is the hard rule that makes that non-negotiable: agents in this repository may
 never send a message or read the owner's real conversations, by any route.
 
