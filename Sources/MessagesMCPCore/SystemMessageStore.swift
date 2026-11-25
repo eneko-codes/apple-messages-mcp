@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// The only type that touches this Mac. Below it is the owner's real archive and the
 /// Shortcuts app; above it, everything runs against a double.
@@ -17,20 +18,27 @@ public struct SystemMessageStore: MessageStore {
 
     private let databasePath: String
     private let shortcutsExecutable: String
+    private let shortcutListTimeout: TimeInterval
+    private let shortcutRunTimeout: TimeInterval
 
     /// Where Messages keeps its database. Re-exported here because `ChatDatabase` is
     /// deliberately internal — the SQLite layer is not part of this module's surface, and
     /// a public default argument cannot name an internal type.
     public static var defaultDatabasePath: String { ChatDatabase.defaultPath }
 
-    /// The path is injectable only so `messages_status` can be exercised against a
-    /// fixture. Nothing in the running server passes anything but the default.
+    /// The path, the executable and the two deadlines are injectable only so the tests
+    /// can run against a fixture database and a stand-in for `shortcuts`. Nothing in the
+    /// running server passes anything but the defaults.
     public init(
         databasePath: String = SystemMessageStore.defaultDatabasePath,
-        shortcutsExecutable: String = "/usr/bin/shortcuts"
+        shortcutsExecutable: String = "/usr/bin/shortcuts",
+        shortcutListTimeout: TimeInterval = TimeInterval(Configuration.shortcutListSeconds),
+        shortcutRunTimeout: TimeInterval = TimeInterval(Configuration.shortcutRunSeconds)
     ) {
         self.databasePath = databasePath
         self.shortcutsExecutable = shortcutsExecutable
+        self.shortcutListTimeout = shortcutListTimeout
+        self.shortcutRunTimeout = shortcutRunTimeout
     }
 
     public func access() -> DatabaseAccess {
@@ -89,9 +97,11 @@ public struct SystemMessageStore: MessageStore {
             }
         }
         // Newest first, and a chat that has never held a message sorts last rather than
-        // in 1970.
+        // in 1970. Ties go by id, so a page boundary falls in the same place on the next
+        // call.
         matches.sort {
-            ($0.lastMessageDate ?? .distantPast) > ($1.lastMessageDate ?? .distantPast)
+            let (first, second) = ($0.lastMessageDate ?? .distantPast, $1.lastMessageDate ?? .distantPast)
+            return first == second ? $0.id > $1.id : first > second
         }
         let page = matches.dropFirst(offset).prefix(limit)
         return ConversationPage(conversations: Array(page), total: matches.count)
@@ -122,23 +132,31 @@ public struct SystemMessageStore: MessageStore {
             }
 
             let handleIDs = try filter.participant.map { try database.handleIDs(matching: $0) }
-            let wanted = limit + offset
-            var kept: [MessageRecord] = []
+            // One match more than the page holds, to learn whether a next page exists.
+            let wanted = offset + limit + 1
+            var matched = 0
+            var page: [MessageRecord] = []
+            var oldestScanned: Date?
 
             let scan = try database.scanMessages(
                 chatID: filter.chatID, handleIDs: handleIDs, service: filter.service,
                 hasAttachment: filter.hasAttachment, fromMe: filter.fromMe,
-                ceiling: filter.scanCeiling
+                from: filter.from, to: filter.to, ceiling: filter.scanCeiling
             ) { record in
-                if filter.accepts(record) { kept.append(record) }
-                return kept.count < wanted
+                oldestScanned = record.date ?? oldestScanned
+                if filter.accepts(record) {
+                    matched += 1
+                    if matched > offset, page.count < limit { page.append(record) }
+                }
+                return matched < wanted
             }
 
-            let page = Array(kept.dropFirst(offset))
+            let hasMore = matched == wanted
             let labels = try database.chatLabels(ids: page.compactMap(\.chatID))
             return MessagePage(
                 messages: page.map { $0.labelled($0.chatID.flatMap { labels[$0] }) },
-                scanned: scan.scanned, hitScanCeiling: scan.hitCeiling, total: nil)
+                scanned: scan.scanned, hitScanCeiling: scan.hitCeiling,
+                total: hasMore ? nil : matched, hasMore: hasMore, oldestScanned: oldestScanned)
         }
     }
 
@@ -187,7 +205,8 @@ public struct SystemMessageStore: MessageStore {
         defer { try? FileManager.default.removeItem(at: inputURL) }
 
         let result = try run(
-            arguments: ["run", shortcutName, "--input-path", inputURL.path], timeout: 30)
+            arguments: ["run", shortcutName, "--input-path", inputURL.path],
+            timeout: shortcutRunTimeout)
         guard result.status == 0 else {
             let detail = result.standardError.isEmpty
                 ? "exit status \(result.status)" : result.standardError
@@ -205,7 +224,9 @@ public struct SystemMessageStore: MessageStore {
     /// to be able to say which.
     private func shortcutIsInstalled(_ name: String) -> Bool? {
         guard FileManager.default.isExecutableFile(atPath: shortcutsExecutable) else { return nil }
-        guard let result = try? run(arguments: ["list"], timeout: 10), result.status == 0 else {
+        guard let result = try? run(arguments: ["list"], timeout: shortcutListTimeout),
+            result.status == 0
+        else {
             return nil
         }
         return result.standardOutput
@@ -217,6 +238,35 @@ public struct SystemMessageStore: MessageStore {
         let status: Int32
         let standardOutput: String
         let standardError: String
+    }
+
+    /// Collects what a subprocess writes to one pipe, on a thread of its own.
+    ///
+    /// Reading has to happen while the process runs: a pipe buffer that fills blocks a
+    /// process that is still writing. It cannot happen on the thread that enforces the
+    /// deadline, because a read only returns at end of file, and a shortcut waiting on a
+    /// dialog never closes its end.
+    private final class PipeDrain: Sendable {
+        private let collected = Mutex(Data())
+        private let finished = DispatchSemaphore(value: 0)
+
+        init(_ handle: FileHandle) {
+            DispatchQueue.global().async { [self] in
+                // An empty chunk is the end of the file; an error ends the reading too.
+                while let chunk = try? handle.read(upToCount: 65_536), !chunk.isEmpty {
+                    collected.withLock { $0.append(chunk) }
+                }
+                finished.signal()
+            }
+        }
+
+        /// What was written, waiting at most `seconds` for the end of the file. A process
+        /// that has exited has closed its end, so the wait is only for a child of it that
+        /// kept the pipe open.
+        func data(waiting seconds: TimeInterval) -> Data {
+            _ = finished.wait(timeout: .now() + seconds)
+            return collected.withLock { $0 }
+        }
     }
 
     /// A shortcut can block forever on a dialog — a permission prompt, or an action
@@ -232,27 +282,23 @@ public struct SystemMessageStore: MessageStore {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+
+        let name = arguments.count > 1 ? arguments[1] : "shortcuts"
         do {
             try process.run()
         } catch {
-            throw ToolError.sendFailed(
-                shortcut: arguments.count > 1 ? arguments[1] : "shortcuts",
-                detail: error.localizedDescription)
+            throw ToolError.sendFailed(shortcut: name, detail: error.localizedDescription)
         }
 
-        // Read before waiting: a pipe buffer that fills would deadlock a process that is
-        // still writing while this side waits for it to exit.
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        let output = PipeDrain(outputPipe.fileHandleForReading)
+        let errors = PipeDrain(errorPipe.fileHandleForReading)
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < deadline {
-            usleep(50_000)
-        }
-        if process.isRunning {
+        guard exited.wait(timeout: .now() + timeout) == .success else {
             process.terminate()
             throw ToolError.sendFailed(
-                shortcut: arguments.count > 1 ? arguments[1] : "shortcuts",
+                shortcut: name,
                 detail:
                     "it was still running after \(Int(timeout))s and was stopped. Shortcuts may be "
                     + "waiting on a dialog; check Messages before retrying.")
@@ -260,8 +306,8 @@ public struct SystemMessageStore: MessageStore {
 
         return ProcessResult(
             status: process.terminationStatus,
-            standardOutput: String(decoding: outputData, as: UTF8.self),
-            standardError: String(decoding: errorData, as: UTF8.self)
+            standardOutput: String(decoding: output.data(waiting: 2), as: UTF8.self),
+            standardError: String(decoding: errors.data(waiting: 2), as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }

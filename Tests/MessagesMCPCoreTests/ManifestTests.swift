@@ -58,6 +58,16 @@ struct ManifestTests {
             try infoPlist()["CFBundleShortVersionString"] as? String == MessagesMCPServer.version)
     }
 
+    /// The manifest is plain JSON and cannot take a figure from a constant, so this holds
+    /// the ones it states to what the code enforces.
+    @Test("The manifest states the bounds the server enforces")
+    func manifestStatesTheBounds() throws {
+        let description = try #require(try manifest()["long_description"] as? String)
+        #expect(description.contains("at most \(Configuration.textWidth) characters"))
+        #expect(description.contains("at most \(Configuration.scanLimit) messages"))
+        #expect(description.contains("after \(MessageTools.defaultTimeout.components.seconds) seconds"))
+    }
+
     /// The send path runs a shortcut, and a prompt raised by it may be attributed to this
     /// binary. Without the key the consent is denied silently, with no dialog.
     @Test("The Info.plist declares the Apple events usage description")

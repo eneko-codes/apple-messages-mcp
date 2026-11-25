@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "apple-messages-mcp",
   "display_name": "Messages",
-  "version": "1.1.1",
+  "version": "2.0.0",
   "description": "Search and read iMessage history; sending is gated by this extension's own permission switch",
-  "long_description": "A local MCP server written in Swift for Messages on this Mac. Reading and sending take different routes.\n\nReading comes from the local Messages database, opened read-only and read through its write-ahead log, so the newest messages are included — this server cannot write to it, and a read-only reader never blocks Messages' own writes. That file is protected, so reading needs Full Disk Access, granted by hand in System Settings. There is no permission dialog for it and no way for a server to ask.\n\nSending goes through a shortcut in the Shortcuts app, so it still works when the database cannot be opened.\n\nPlug and play: there is nothing to configure. SENDING is off unless you build a shortcut named exactly \"Claude Send Message\" in the Shortcuts app, and even then is controlled only by this extension's own permission switch below — set it to \"ask\" to approve every send by hand, or \"prohibit\" to disable sending entirely. Sending cannot be undone and there is no recall.\n\nNo tool here modifies or deletes a message.\n\nNot affiliated with or endorsed by Apple Inc.",
+  "long_description": "A local MCP server written in Swift for Messages on this Mac. Reading and sending take different routes.\n\nReading comes from the local Messages database, opened read-only and read through its write-ahead log, so the newest messages are included — this server cannot write to it, and a read-only reader never blocks Messages' own writes. That file is protected, so reading needs Full Disk Access, granted by hand in System Settings. There is no permission dialog for it and no way for a server to ask.\n\nEvery result is bounded. Conversations, messages and attachments come one page at a time, newest first for conversations and messages; when a result does not hold everything, its first lines say how much there is and the exact arguments that return the rest (limit and offset). A message's text is shown on one line of at most 160 characters, and the first lines say when one was clipped; no tool reads one message in full. A search reads at most 20000 messages and, when it stops there, gives the to_date that goes on from the oldest one it read. A limit or an offset outside its range is moved to the nearest allowed value, and the result says which one was used; an id outside its range is refused.\n\nEvery call is bounded too: one that has not finished after 50 seconds is abandoned and answered with an error that says so.\n\nSending goes through a shortcut in the Shortcuts app, so it still works when the database cannot be opened.\n\nPlug and play: there is nothing to configure. SENDING is off unless you build a shortcut named exactly \"Claude Send Message\" in the Shortcuts app, and even then is controlled only by this extension's own permission switch below — set it to \"ask\" to approve every send by hand, or \"prohibit\" to disable sending entirely. Sending cannot be undone and there is no recall.\n\nNo tool here modifies or deletes a message.\n\nNot affiliated with or endorsed by Apple Inc.",
   "author": {
     "name": "eneko-codes",
     "url": "https://github.com/eneko-codes"
@@ -34,23 +34,23 @@
   "tools": [
     {
       "name": "messages_status",
-      "description": "Reports whether this server can read the Messages database, whether the send shortcut exists, and the exact path of the binary to add to Full Disk Access. Reads no messages."
+      "description": "Reports whether this server can read the Messages database, whether the send shortcut exists, the limits the other tools work to, and the exact path of the binary to add to Full Disk Access. Reads no messages."
     },
     {
       "name": "conversations_list",
-      "description": "Lists conversations newest-activity first, with participants, whether each is a group, its message count, unread count and id."
+      "description": "Lists conversations one page at a time, the one with the newest message first, with participants, whether each is a group, its message count, unread count and id; limit and offset reach the rest."
     },
     {
       "name": "conversation_get",
-      "description": "Returns one page of a thread, NEWEST FIRST, with the sender, timestamp, text and message id of each row. Page backwards through the history with 'offset'."
+      "description": "Returns the newest messages of one conversation, NEWEST FIRST, one page at a time, with the sender, timestamp, text and message id of each; limit and offset go further back. Text is one line, clipped when long."
     },
     {
       "name": "messages_search",
-      "description": "Finds messages across the whole archive, newest first. Every filter mirrors a column the database already has, and they combine with AND."
+      "description": "Finds messages across every conversation, newest first, one page at a time; filters combine with AND, from_date and to_date are inclusive. A search reads a bounded number of messages and says when it stopped and how to go on."
     },
     {
       "name": "message_attachments",
-      "description": "Lists what is attached to the given messages: file name, type, size, direction, the path on disk and whether the file is still there — old attachments are offloaded to iCloud and leave their row…"
+      "description": "Lists what is attached to the given messages, one page at a time: file name, type, size, direction, the path on disk and whether the file is still there. It never copies or opens one."
     },
     {
       "name": "send_message",

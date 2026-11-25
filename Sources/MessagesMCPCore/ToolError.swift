@@ -14,6 +14,16 @@ public enum ToolError: Error, Equatable {
     case sendFailed(shortcut: String, detail: String)
     case schemaUnsupported(table: String, missing: [String])
     case storeFailure(String)
+    case unknownTool(String)
+    case timedOut(seconds: Int, sending: Bool)
+
+    /// Another program's own words (SQLite's, the `shortcuts` tool's), cut to what an
+    /// error may repeat, with the length of the whole so the cut is not silent.
+    static func detail(_ text: String) -> String {
+        let width = Configuration.errorDetailWidth
+        guard text.count > width else { return text }
+        return String(text.prefix(width)) + "… (the first \(width) of \(text.count) characters)"
+    }
 
     public var message: String {
         switch self {
@@ -28,16 +38,23 @@ public enum ToolError: Error, Equatable {
 
         case .badDate(let argument, let value):
             return """
-                Argument '\(argument)' is not a date this server accepts: '\(value)'
+                Argument '\(argument)' is not a date this server accepts, or names a day \
+                or a time that does not exist: '\(ToolStandard.echo(value))'
 
                 Use one of:
                 \(DateParsing.acceptedForms)
 
-                A plain day given as 'to' covers that whole day.
+                from_date and to_date are both inclusive: to_date covers the whole day, \
+                minute or second it names.
                 """
 
         case .endBeforeStart:
-            return "'to' is before 'from'. A range cannot end before it begins."
+            return """
+                'to_date' ends before 'from_date' begins. Give a range that starts before \
+                it ends, or leave one of them out: from_date alone runs to the newest \
+                message, to_date alone from the oldest. Each takes one of:
+                \(DateParsing.acceptedForms)
+                """
 
         case .conversationNotFound(let id):
             return """
@@ -93,7 +110,7 @@ public enum ToolError: Error, Equatable {
 
         case .sendFailed(let shortcut, let detail):
             return """
-                Running the shortcut '\(shortcut)' failed: \(detail)
+                Running the shortcut '\(shortcut)' failed: \(Self.detail(detail))
 
                 The message may or may not have been sent — a shortcut can fail after its
                 Send Message action. Check Messages before trying again, so nobody receives
@@ -117,7 +134,29 @@ public enum ToolError: Error, Equatable {
                 """
 
         case .storeFailure(let detail):
-            return "The Messages database returned an error: \(detail)"
+            return "The Messages database returned an error: \(Self.detail(detail))"
+
+        case .unknownTool(let name):
+            return "'\(ToolStandard.echo(name))' is not a tool of this server."
+
+        case .timedOut(let seconds, let sending):
+            let consequence =
+                sending
+                ? """
+                    THE MESSAGE MAY OR MAY NOT HAVE BEEN SENT. The shortcut was still running \
+                    when this call gave up on it. Check the conversation in Messages before \
+                    trying again, so nobody receives the same thing twice.
+                    """
+                : """
+                    This tool only reads, so nothing was changed. Ask for less: a lower \
+                    limit, or a search narrowed by conversation_id, participant, from_date or \
+                    to_date. messages_status says whether the database still answers at all.
+                    """
+            return """
+                The call did not finish within \(seconds) seconds and was abandoned.
+
+                \(consequence)
+                """
         }
     }
 
@@ -161,7 +200,7 @@ public enum ToolError: Error, Equatable {
 
         case .failed(let detail):
             return """
-                Could not open the Messages database: \(detail)
+                Could not open the Messages database: \(Self.detail(detail))
 
                 Messages holds it open with a write-ahead log, which this server reads but
                 never writes — it opens the file read-only, and a read-only reader in WAL

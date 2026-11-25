@@ -213,6 +213,153 @@ struct FixtureDatabaseTests {
         try fixture.execute("INSERT INTO chat_message_join VALUES (1, 1)")
     }
 
+    // MARK: Paging and bounding a search where the rows are read
+
+    /// Ten messages an hour apart, id 10 the newest; the even ones mention bread.
+    private func archive() throws -> Fixture {
+        let fixture = try Fixture()
+        try fixture.insertChat()
+        for id in 1...10 {
+            try fixture.insertMessage(
+                id: id, text: id.isMultiple(of: 2) ? "bread \(id)" : "other \(id)", at: Self.date(10, id))
+        }
+        return fixture
+    }
+
+    @Test("A search stops one match past its page, and the next page starts where it ended")
+    func searchPagesChain() async throws {
+        let fixture = try archive()
+        var filter = MessageFilter()
+        filter.query = "bread"
+
+        let first = try await store(fixture).search(filter, limit: 2, offset: 0)
+        #expect(first.messages.map(\.id) == [10, 8])
+        #expect(first.hasMore && first.total == nil && !first.hitScanCeiling)
+        // It read no further than the match that proved another page exists.
+        #expect(first.scanned == 5)
+
+        let second = try await store(fixture).search(filter, limit: 2, offset: 2)
+        #expect(second.messages.map(\.id) == [6, 4])
+        #expect(second.hasMore)
+
+        let last = try await store(fixture).search(filter, limit: 2, offset: 4)
+        #expect(last.messages.map(\.id) == [2])
+        #expect(!last.hasMore && last.total == 5 && !last.hitScanCeiling)
+
+        let past = try await store(fixture).search(filter, limit: 2, offset: 9)
+        #expect(past.messages.isEmpty && past.total == 5)
+    }
+
+    @Test("The ceiling counts the rows read, and the oldest one read is reported")
+    func scanCeiling() async throws {
+        let fixture = try archive()
+        var filter = MessageFilter()
+        filter.query = "bread"
+        filter.scanCeiling = 3
+
+        let page = try await store(fixture).search(filter, limit: 5, offset: 0)
+        #expect(page.scanned == 3)
+        #expect(page.hitScanCeiling && !page.hasMore)
+        #expect(page.messages.map(\.id) == [10, 8])
+        #expect(page.total == 2)
+        #expect(page.oldestScanned == Self.date(10, 8))
+    }
+
+    @Test("A date range chooses the rows that are read, so an old period is reached under the ceiling")
+    func dateRangeNarrowsTheScan() async throws {
+        let fixture = try archive()
+        var filter = MessageFilter()
+        filter.query = "bread"
+        filter.scanCeiling = 3
+        // The end is the first moment no longer wanted: one second past message 4.
+        filter.to = Self.date(10, 4).addingTimeInterval(1)
+
+        let older = try await store(fixture).search(filter, limit: 5, offset: 0)
+        #expect(older.messages.map(\.id) == [4, 2])
+        #expect(older.scanned == 3 && older.hitScanCeiling)
+        #expect(older.oldestScanned == Self.date(10, 2))
+
+        filter.from = Self.date(10, 3)
+        let window = try await store(fixture).search(filter, limit: 5, offset: 0)
+        #expect(window.messages.map(\.id) == [4])
+        #expect(window.scanned == 2 && !window.hitScanCeiling && window.total == 1)
+    }
+
+    @Test("A row stored in seconds is found by the same date range as one stored in nanoseconds")
+    func dateRangeReadsBothUnits() async throws {
+        let fixture = try Fixture()
+        try fixture.insertChat()
+        try fixture.insertMessage(id: 2, text: "nanoseconds", at: Self.date(5, 10))
+        try fixture.execute(
+            "INSERT INTO message (ROWID, guid, text, handle_id, service, date, is_from_me, is_read, "
+                + "associated_message_type) VALUES (1, 'G1', 'seconds', 1, 'iMessage', "
+                + "\(AppleAbsoluteTime.rawValue(from: Self.date(5, 9), unit: .seconds)), 0, 1, 0)")
+        try fixture.execute("INSERT INTO chat_message_join VALUES (1, 1)")
+        // No date at all: it cannot be shown to fall inside a range.
+        try fixture.execute(
+            "INSERT INTO message (ROWID, guid, text, handle_id, service, date, is_from_me, is_read, "
+                + "associated_message_type) VALUES (3, 'G3', 'undated', 1, 'iMessage', 0, 0, 1, 0)")
+        try fixture.execute("INSERT INTO chat_message_join VALUES (1, 3)")
+
+        var filter = MessageFilter()
+        filter.from = Self.date(5, 0)
+        filter.to = Self.date(6, 0)
+        #expect(try await store(fixture).search(filter, limit: 5, offset: 0).messages.map(\.id) == [2, 1])
+
+        // Half an hour after the row stored in seconds, so the bound falls between the two.
+        filter.from = Self.date(5, 9).addingTimeInterval(1800)
+        #expect(try await store(fixture).search(filter, limit: 5, offset: 0).messages.map(\.id) == [2])
+
+        filter.from = nil
+        filter.to = Self.date(5, 9).addingTimeInterval(1800)
+        let untilThen = try await store(fixture).search(filter, limit: 5, offset: 0)
+        #expect(untilThen.messages.map(\.id) == [1])
+        #expect(untilThen.scanned == 1)
+
+        #expect(try await store(fixture).search(MessageFilter(), limit: 5, offset: 0).messages.count == 3)
+    }
+
+    @Test("Conversations with the same latest message are ordered by id, so a page boundary stays put")
+    func conversationsOrderHasNoTies() async throws {
+        let fixture = try populated()
+        for id in [2, 3, 4] {
+            try fixture.execute("INSERT INTO chat VALUES (\(id), 'G\(id)', 'chat\(id)', NULL, 'iMessage', 43)")
+        }
+        let all = try await store(fixture).conversations(query: nil, limit: 10, offset: 0)
+        #expect(all.conversations.map(\.id) == [1, 4, 3, 2])
+        #expect(all.total == 4)
+        let page = try await store(fixture).conversations(query: nil, limit: 2, offset: 1)
+        #expect(page.conversations.map(\.id) == [4, 3])
+    }
+
+    @Test("conversation_get pages through the real database, each page starting where the last ended")
+    func threadPagesChain() async throws {
+        let fixture = try archive()
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let tools = MessageTools(store: store(fixture), calendar: utc)
+        var shown: [String] = []
+        for (offset, expected) in [
+            (0, "Showing 1–4 of 10 messages. Pass offset=4 for the next page."),
+            (4, "Showing 5–8 of 10 messages. Pass offset=8 for the next page."),
+            (8, "Showing 9–10 of 10 messages. That is all."),
+        ] {
+            let result = await tools.handle(
+                .init(name: ToolCatalog.conversationName, arguments: ["conversation_id": 1, "limit": 4, "offset": .int(offset)]))
+            #expect(!result.isError)
+            #expect(result.text.hasPrefix(expected + "\n\n"))
+            shown += result.text.components(separatedBy: "\n").filter { $0.contains("  id=") }
+        }
+        #expect(shown.count == 10)
+        #expect(shown.first?.hasSuffix("bread 10  id=10") == true)
+        #expect(shown.last?.hasSuffix("other 1  id=1") == true)
+
+        let search = await tools.handle(
+            .init(name: ToolCatalog.searchName, arguments: ["query": "bread", "to_date": "2026-08-10T04:00", "limit": 1]))
+        #expect(search.text.hasPrefix("Showing 1–1 messages; more exist. Pass offset=1 for the next page.\n\n"))
+        #expect(search.text.contains("bread 4  id=4"))
+    }
+
     @Test("A path with no database is reported missing, and nothing is created there")
     func missingFile() async throws {
         let path = FileManager.default.temporaryDirectory

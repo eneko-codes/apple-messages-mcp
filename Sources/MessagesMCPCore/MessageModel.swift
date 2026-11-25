@@ -154,20 +154,30 @@ public struct MessagePage: Sendable, Equatable {
     /// the body is decoded, so it cannot be counted by SQL.
     public let scanned: Int
     /// True when the scan stopped at its ceiling rather than at the end of the data, so
-    /// the answer is "the newest N matches", not "the matches".
+    /// rows older than `oldestScanned` were never looked at.
     public let hitScanCeiling: Bool
-    /// Known only where SQL alone decides the result set — a whole conversation. `nil`
-    /// for a text search.
+    /// How many messages match, when the store could count them: every message of a
+    /// conversation, or every match of a search whose scan was not cut short by finding
+    /// the page. After `hitScanCeiling` it counts only the matches among the rows scanned.
+    /// `nil` when the scan stopped as soon as it knew another page exists.
     public let total: Int?
+    /// True when a search found a match beyond this page and stopped there, so a next
+    /// page exists and `total` is not known.
+    public let hasMore: Bool
+    /// The date of the oldest row a search read. After `hitScanCeiling` it is where a
+    /// search narrowed with `to_date` picks up.
+    public let oldestScanned: Date?
 
     public init(
         messages: [MessageRecord], scanned: Int = 0, hitScanCeiling: Bool = false,
-        total: Int? = nil
+        total: Int? = nil, hasMore: Bool = false, oldestScanned: Date? = nil
     ) {
         self.messages = messages
         self.scanned = scanned
         self.hitScanCeiling = hitScanCeiling
         self.total = total
+        self.hasMore = hasMore
+        self.oldestScanned = oldestScanned
     }
 }
 
@@ -178,24 +188,29 @@ public struct MessageFilter: Sendable, Equatable {
     public var query: String?
     public var participant: String?
     public var chatID: Int64?
+    /// The earliest moment wanted, included.
     public var from: Date?
+    /// The first moment no longer wanted. `to_date` is inclusive at the precision it was
+    /// written in, so this is the end of the day, minute or second the caller named.
     public var to: Date?
     public var hasAttachment: Bool?
     public var service: String?
     public var fromMe: Bool?
     /// How many rows the store may read before giving up. Carried on the filter so the
     /// store never has to know about `Configuration`.
-    public var scanCeiling: Int = 20_000
+    public var scanCeiling: Int = Configuration.scanLimit
 
     public init() {}
 
-    /// The two predicates SQL cannot answer.
+    /// The two predicates SQL cannot settle.
     ///
-    /// The date range is decided here because `message.date` may hold seconds or
-    /// nanoseconds and only the converted value is comparable. The text query is decided
-    /// here because a modern body lives in `attributedBody`, a binary archive SQL cannot
-    /// look inside — matching only the `text` column would quietly miss most of the
-    /// recent archive, which is the worst possible failure for a search.
+    /// The date range is settled here because `message.date` may hold seconds or
+    /// nanoseconds and only the converted value is exactly comparable; SQL applies a
+    /// slightly wider range first, so that a scan starts and ends near the right rows. The
+    /// text query is decided here because a modern body lives in `attributedBody`, a
+    /// binary archive SQL cannot look inside — matching only the `text` column would
+    /// quietly miss most of the recent archive, which is the worst possible failure for a
+    /// search.
     public func accepts(_ record: MessageRecord) -> Bool {
         if from != nil || to != nil {
             // A row with no date cannot be shown to fall inside a range, and guessing

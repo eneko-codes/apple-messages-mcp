@@ -508,16 +508,29 @@ final class ChatDatabase {
     /// Streams messages newest-first through `consume`, which stops the scan by returning
     /// false.
     ///
-    /// Only the predicates SQL can decide are pushed down. The date range is deliberately
-    /// not among them: `message.date` may hold either unit, so a bound expressed in one
-    /// of them would silently exclude rows stored in the other. Dates are compared above,
-    /// on the converted value, where both readings are already resolved.
+    /// Only the predicates SQL can decide are pushed down. The date range is pushed down
+    /// a second wider at each end and settled above, on the converted value: the scan has
+    /// to start near the range, or a search for an old period would spend its whole
+    /// ceiling on newer rows and never reach it, while the exact comparison belongs where
+    /// both units are already resolved. `to` is the first moment no longer wanted.
     func scanMessages(
         chatID: Int64?, handleIDs: [Int64]?, service: String?, hasAttachment: Bool?,
-        fromMe: Bool?, ceiling: Int, consume: (MessageRecord) -> Bool
+        fromMe: Bool?, from: Date? = nil, to: Date? = nil, ceiling: Int,
+        consume: (MessageRecord) -> Bool
     ) throws -> (scanned: Int, hitCeiling: Bool) {
         var conditions: [String] = []
         var boundService: String?
+
+        if from != nil || to != nil {
+            // A row with no date cannot be shown to fall inside a range.
+            conditions.append("m.date != 0")
+        }
+        if let lowest = from.flatMap({ Self.wholeSeconds($0, rounded: .down) }) {
+            conditions.append("\(Self.secondsExpression) >= \(lowest - 1)")
+        }
+        if let highest = to.flatMap({ Self.wholeSeconds($0, rounded: .up) }) {
+            conditions.append("\(Self.secondsExpression) <= \(highest + 1)")
+        }
 
         if chatID != nil { conditions.append("j.chat_id = ?1") }
         if let handleIDs {
@@ -584,6 +597,19 @@ final class ChatDatabase {
         // Reaching the ceiling means the answer is "the newest N matches", not "the
         // matches", and the caller has to be able to say so.
         return (scanned, scanned >= ceiling && !stoppedEarly)
+    }
+
+    /// `message.date` in whole seconds since 2001 whichever unit the row holds, mirroring
+    /// `AppleAbsoluteTime.date(fromRawValue:)`. Integer division, so nothing can overflow.
+    private static let secondsExpression = """
+        (CASE WHEN ABS(m.date) >= \(AppleAbsoluteTime.nanosecondFloor) \
+        THEN m.date / 1000000000 ELSE m.date END)
+        """
+
+    /// `nil` for a date too far from 2001 to count in whole seconds, which no bound a
+    /// caller can write reaches; the range is then left to the comparison above SQL.
+    private static func wholeSeconds(_ date: Date, rounded rule: FloatingPointRoundingRule) -> Int64? {
+        Int64(exactly: (date.timeIntervalSince1970 - AppleAbsoluteTime.referenceOffset).rounded(rule))
     }
 
     /// Human-readable names for a set of chats, so a search result can say which thread
